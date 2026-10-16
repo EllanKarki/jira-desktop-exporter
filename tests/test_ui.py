@@ -55,3 +55,36 @@ def test_login_then_export(jira_server, tmp_path, monkeypatch):
     ws = load_workbook(out).active
     assert ws.max_row == 251
     assert ws["A1"].value == "Issue Key"
+
+
+def test_cloud_login_then_export(cloud_server, tmp_path, monkeypatch):
+    for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
+        QSettings.setPath(fmt, QSettings.UserScope, str(tmp_path))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: None)
+    qapp = QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+
+    lp = win.login
+    lp.url.setText("https://acme.atlassian.net")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+    assert lp.user_label.text() == "Email"
+    assert lp.secret_label.text() == "API token"
+    assert lp.use_token.isHidden()
+
+    lp.url.setText(f"http://127.0.0.1:{cloud_server.server_address[1]}")  # stays on Cloud
+    lp.username.setText("alice")
+    lp.password.setText("secret")
+    lp.connect_btn.click()
+    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    assert "Jira Cloud" in win.export.user_label.text()
+
+    ep = win.export
+    ep.jql.setPlainText("project = ABC")
+    ep.config_path.setText(str(ROOT / "config" / "fields.json"))
+    out = tmp_path / "cloud_ui.xlsx"
+    ep.out_path.setText(str(out))
+    ep.export_btn.click()
+    wait_until(qapp, lambda: "Done: 250 issues" in ep.log.toPlainText())
+    assert load_workbook(out).active.max_row == 251

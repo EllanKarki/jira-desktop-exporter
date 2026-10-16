@@ -1,10 +1,13 @@
 # Jira Desktop Exporter
 
-A desktop app (Windows and macOS) for Jira Data Center users with normal Jira access. Log in with your own Jira URL and credentials, run a JQL query, and export the matching issues to an Excel file. The columns come from a config file.
+A desktop app (Windows and macOS) for Jira users with normal Jira access, on **Jira Data Center/Server** or **Jira Cloud**. Log in with your own Jira URL and credentials, run a JQL query, and export the matching issues to an Excel file. The columns come from a config file.
 
 ## Features
 
-- **Login screen:** Jira URL, username and password. You can also use a Personal Access Token if your Jira allows it (Data Center 8.14+). The password is never saved. The URL and username are remembered.
+- **Login screen:** Jira URL, Jira type and credentials. The password or token is never saved; the URL, type and username are remembered.
+  - **Data Center / Server:** username and password, or a Personal Access Token (Data Center 8.14+).
+  - **Cloud:** email and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens). Cloud doesn't accept account passwords for API access.
+  - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
 
@@ -61,7 +64,9 @@ The tests run against a local fake Jira server, including a headless run of the 
 
 ## Notes and limits
 
-- The app talks to Jira's REST API v2 (`/rest/api/2/myself`, `/field`, `/search`), which Jira Data Center provides.
-- If your company uses SSO-only login or has disabled basic auth, password login won't work. Use a Personal Access Token instead (Profile → Personal Access Tokens in Jira).
+- **Data Center** uses REST API v2: `/rest/api/2/myself`, `/field`, `/search` (pages with `startAt`).
+- **Cloud** uses REST API v3: `/rest/api/3/myself`, `/field`, `/search/jql` (pages with `nextPageToken`), and `/search/approximate-count` for the progress bar. The older `/rest/api/3/search` has been removed from Cloud. Rich-text fields such as Description come back from Cloud in Atlassian Document Format and are converted to plain text.
+- Jira Cloud rejects unbounded JQL (for example `ORDER BY created` on its own). Add a condition such as `project = ABC`.
+- Data Center: if your company uses SSO-only login or has disabled basic auth, password login won't work. Use a Personal Access Token instead (Profile → Personal Access Tokens in Jira).
 - If Jira has shown you a CAPTCHA after failed logins, log in once in the browser first.
 - If you use an internal certificate authority, untick **Verify SSL certificate**. Only do this on a network you trust.

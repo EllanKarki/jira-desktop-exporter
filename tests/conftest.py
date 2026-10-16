@@ -17,7 +17,17 @@ FIELDS = [
     {"id": "duedate", "name": "Due Date", "schema": {"type": "date"}},
     {"id": "labels", "name": "Labels", "schema": {"type": "array"}},
     {"id": "customfield_10002", "name": "Story Points", "schema": {"type": "number"}},
+    {"id": "description", "name": "Description", "schema": {"type": "string"}},
 ]
+
+ADF_DESC = {"type": "doc", "version": 1, "content": [
+    {"type": "paragraph", "content": [{"type": "text", "text": "Hello "},
+                                      {"type": "text", "text": "world", "marks": [{"type": "strong"}]}]},
+    {"type": "bulletList", "content": [
+        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "one"}]}]},
+        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "two"}]}]},
+    ]},
+]}
 
 ISSUES = [
     {
@@ -30,6 +40,7 @@ ISSUES = [
             "duedate": "2026-02-01",
             "labels": ["a", "b"],
             "customfield_10002": i,
+            "description": "Plain description",
         },
     }
     for i in range(1, 251)
@@ -60,9 +71,12 @@ class FakeJira(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._authed():
             return self._send(401, {"errorMessages": ["nope"]})
-        if self.path == "/rest/api/2/myself":
+        cloud = self.server.cloud
+        if self.path == ("/rest/api/3/myself" if cloud else "/rest/api/2/myself"):
+            if cloud:
+                return self._send(200, {"accountId": "5b10ac", "displayName": "Alice Cloud"})
             return self._send(200, {"name": "alice", "displayName": "Alice A"})
-        if self.path == "/rest/api/2/field":
+        if self.path == ("/rest/api/3/field" if cloud else "/rest/api/2/field"):
             return self._send(200, FIELDS)
         self._send(404, {"errorMessages": ["not found"]})
 
@@ -72,17 +86,49 @@ class FakeJira(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if body["jql"] == "bad":
             return self._send(400, {"errorMessages": ["Error in the JQL Query"]})
+        self.server.requests.append((self.path, body))
+        if self.server.cloud:
+            return self._post_cloud(body)
+        if self.path != "/rest/api/2/search":
+            return self._send(404, {})
         start, n = body["startAt"], body["maxResults"]
-        self.server.requests.append(body)
         self._send(200, {"startAt": start, "maxResults": n, "total": len(ISSUES),
                          "issues": ISSUES[start:start + n]})
+
+    def _post_cloud(self, body):
+        # Mirrors Jira Cloud: the old /search is gone, /search/jql pages by token
+        # without a total, and /search/approximate-count gives the count.
+        if self.path == "/rest/api/3/search/approximate-count":
+            return self._send(200, {"count": len(ISSUES)})
+        if self.path != "/rest/api/3/search/jql":
+            return self._send(410, {"errorMessages": ["The requested API has been removed."]})
+        start = int(body.get("nextPageToken") or 0)
+        n = body["maxResults"]
+        page = [dict(i, fields=dict(i["fields"], description=ADF_DESC))
+                for i in ISSUES[start:start + n]]
+        resp = {"issues": page, "isLast": start + n >= len(ISSUES)}
+        if not resp["isLast"]:
+            resp["nextPageToken"] = str(start + n)
+        self._send(200, resp)
+
+
+def _serve(cloud):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeJira)
+    srv.requests = []
+    srv.cloud = cloud
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 
 @pytest.fixture
 def jira_server():
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeJira)
-    srv.requests = []
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
+    srv = _serve(cloud=False)
+    yield srv
+    srv.shutdown()
+
+
+@pytest.fixture
+def cloud_server():
+    srv = _serve(cloud=True)
     yield srv
     srv.shutdown()
