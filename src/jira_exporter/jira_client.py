@@ -18,7 +18,10 @@ class JiraError(Exception):
 
 def guess_deployment(url: str) -> str:
     """Atlassian-hosted sites live on *.atlassian.net; anything else is assumed self-hosted."""
-    host = urlparse(url if "://" in url else "https://" + url).hostname or ""
+    try:
+        host = urlparse(url if "://" in url else "https://" + url).hostname or ""
+    except ValueError:  # e.g. a stray "]" makes urlparse reject the host
+        return DATA_CENTER
     return CLOUD if host.endswith(".atlassian.net") else DATA_CENTER
 
 

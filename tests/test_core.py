@@ -190,6 +190,21 @@ def _li(*content):
     (_doc({"type": "codeBlock", "content": [_t("    x = 1\n    y = 2")]}),
      "    x = 1\n    y = 2"),
     (_doc(), ""),
+    (_doc(_p(_t("See the "), _t("release ", marks=[{"type": "link", "attrs": {"href": "https://x/r"}}]),
+             _t("notes", marks=[{"type": "link", "attrs": {"href": "https://x/r"}}, {"type": "strong"}]),
+             _t(" now"))),
+     "See the release notes (https://x/r) now"),
+    (_doc({"type": "bulletList", "content": [_li(_p(_t("top")), {"type": "bulletList", "content": [
+        _li(_p(_t("para 1")), _p(_t("para 2")), {"type": "codeBlock", "content": [_t("make\nmake test")]}),
+        _li(_p(_t("child 2")))]})]}),
+     "- top\n  - para 1\n    para 2\n    make\n    make test\n  - child 2"),
+    (_doc({"type": "bulletList", "content": [_li(_p(_t("a"), {"type": "hardBreak"}, _t("b")))]}),
+     "- a\n  b"),
+    (_doc({"type": "taskList", "content": [
+        {"type": "taskItem", "attrs": {"state": "TODO"}, "content": [_t("parent")]},
+        {"type": "taskList", "content": [
+            {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [_t("child")]}]}]}),
+     "[ ] parent\n  [x] child"),
 ])
 def test_adf_shapes(doc, expected):
     assert format_value(doc) == expected
@@ -210,3 +225,7 @@ def test_cloud_progress_when_count_unavailable(cloud_server, monkeypatch):
                                 progress=lambda d, t: seen.append((d, t))))
     assert n == 250
     assert seen == [(100, 0), (200, 0), (250, 0)]
+
+
+def test_guess_deployment_malformed_url():
+    assert guess_deployment("https://jira.acme.com]") == DATA_CENTER

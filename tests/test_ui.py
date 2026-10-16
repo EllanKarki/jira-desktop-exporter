@@ -148,6 +148,53 @@ def test_progress_without_total_stays_busy(tmp_path):
     ep = win.export
     ep._on_progress(100, 0)
     assert ep.progress.maximum() == 0
-    assert ep.progress.format() == "100 issues"
+    assert ep.progress_label.text() == "100 issues fetched (total unknown)"
     ep._on_progress(100, 250)
     assert ep.progress.maximum() == 250
+    assert ep.progress_label.text() == "100 of 250 issues fetched"
+
+
+def test_guess_deployment_survives_malformed_saved_url(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://jira.acme.com]")
+    s.setValue("deployment", "cloud")
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    assert win.login.deployment.currentData() == "cloud"
+
+
+def test_url_round_trip_keeps_manual_cloud_choice(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    lp.url.setText("https://jira.acme.com")
+    lp._guess_deployment()
+    lp.deployment.setCurrentIndex(lp.deployment.findData("cloud"))
+    lp.deployment.activated.emit(lp.deployment.currentIndex())
+    for url in ("https://acme.atlassian.net", "https://jira.acme.com"):
+        lp.url.setText(url)
+        lp._guess_deployment()
+        assert lp.deployment.currentData() == "cloud"
+
+
+def test_cancelled_export_does_not_show_full_bar(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+
+    class FakeWorker:
+        _cancel = True
+
+    class FakeThread:
+        def quit(self):
+            pass
+
+    ep._worker, ep._thread = FakeWorker(), FakeThread()
+    ep._on_progress(100, 250)
+    ep._on_finished(100, "/tmp/x.xlsx")
+    assert ep.progress.value() == 100 and ep.progress.maximum() == 250
+    assert ep.progress_label.text() == "Cancelled: 100 issues saved"

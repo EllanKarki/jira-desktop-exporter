@@ -45,28 +45,24 @@ def format_value(value: Any, schema_type: str | None = None) -> Any:
 
 
 _ADF_BLOCKS = {"paragraph", "heading", "blockquote", "codeBlock", "panel", "rule",
-               "taskItem", "decisionItem", "blockCard", "embedCard", "mediaSingle"}
+               "decisionItem", "mediaSingle"}
 
 
-def adf_to_text(node: Any, depth: int = 0) -> str:
+def adf_to_text(node: Any) -> str:
     """Flatten an Atlassian Document Format tree into plain text.
 
-    Lists keep their numbering and nesting (two spaces per level), table rows
-    become "a | b | c" lines, and link targets are kept next to their text.
+    Lists keep their numbering, and nested content is indented under its item.
+    Table rows become "a | b | c" lines, and link targets are kept next to their text.
     """
     if isinstance(node, list):
-        return "".join(adf_to_text(n, depth) for n in node)
+        return _adf_inline_run(node)
     if not isinstance(node, dict):
         return ""
     kind = node.get("type")
     attrs = node.get("attrs") or {}
+    content = node.get("content") or []
     if kind == "text":
-        text = node.get("text", "")
-        for mark in node.get("marks") or []:
-            href = (mark.get("attrs") or {}).get("href") if mark.get("type") == "link" else None
-            if href and href != text:
-                text = f"{text} ({href})"
-        return text
+        return _with_href(node.get("text", ""), _link_href(node))
     if kind == "hardBreak":
         return "\n"
     if kind == "date":
@@ -75,28 +71,78 @@ def adf_to_text(node: Any, depth: int = 0) -> str:
             return datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
         except (TypeError, ValueError, OverflowError, OSError):
             return str(attrs.get("timestamp") or "")
-    if kind in ("mention", "emoji", "status", "inlineCard", "blockCard", "embedCard"):
-        text = str(attrs.get("text") or attrs.get("shortName") or attrs.get("url") or "")
-        return text + "\n" if kind in _ADF_BLOCKS else text
+    if kind in ("mention", "emoji", "status", "inlineCard"):
+        return str(attrs.get("text") or attrs.get("shortName") or attrs.get("url") or "")
+    if kind in ("blockCard", "embedCard"):
+        return str(attrs.get("url") or "") + "\n"
     if kind in ("bulletList", "orderedList"):
         first = attrs.get("order", 1) if kind == "orderedList" else None
-        lines = []
-        for i, item in enumerate(c for c in node.get("content", []) if isinstance(c, dict)):
-            marker = f"{first + i}. " if first is not None else "- "
-            body = adf_to_text(item.get("content", []), depth + 1).strip("\n")
-            lines.append("  " * depth + marker + body.lstrip(" ") + "\n")
-        return "".join(lines)
-    if kind == "taskItem":
-        box = "[x] " if attrs.get("state") == "DONE" else "[ ] "
-        return "  " * depth + box + adf_to_text(node.get("content", []), depth).strip("\n") + "\n"
+        items = [c for c in content if isinstance(c, dict)]
+        return "".join(
+            _list_entry(f"{first + i}. " if first is not None else "- ", adf_to_text(item.get("content") or []))
+            for i, item in enumerate(items))
+    if kind == "taskList":
+        out = []
+        for child in content:
+            if not isinstance(child, dict):
+                continue
+            if child.get("type") == "taskList":  # an indented (nested) action item list
+                out.append(_indent(adf_to_text(child), "  "))
+            else:
+                box = "[x] " if (child.get("attrs") or {}).get("state") == "DONE" else "[ ] "
+                out.append(_list_entry(box, adf_to_text(child.get("content") or [])))
+        return "".join(out)
     if kind == "tableRow":
-        cells = [" ".join(adf_to_text(c.get("content", []), depth).split())
-                 for c in node.get("content", []) if isinstance(c, dict)]
+        cells = [" ".join(adf_to_text(c.get("content") or []).split())
+                 for c in content if isinstance(c, dict)]
         return " | ".join(cells) + "\n"
-    text = adf_to_text(node.get("content", []), depth)
+    text = adf_to_text(content)
     if kind in _ADF_BLOCKS:
         text = text.rstrip("\n") + "\n"
     return text
+
+
+def _link_href(node: Any) -> str | None:
+    if not isinstance(node, dict) or node.get("type") != "text":
+        return None
+    for mark in node.get("marks") or []:
+        if isinstance(mark, dict) and mark.get("type") == "link":
+            return (mark.get("attrs") or {}).get("href")
+    return None
+
+
+def _with_href(text: str, href: str | None) -> str:
+    return f"{text} ({href})" if href and href != text else text
+
+
+def _adf_inline_run(nodes: list) -> str:
+    """Join sibling nodes; text pieces of one link (split by bold etc.) share one URL."""
+    out, i = [], 0
+    while i < len(nodes):
+        href = _link_href(nodes[i])
+        if href:
+            j = i
+            while j < len(nodes) and _link_href(nodes[j]) == href:
+                j += 1
+            out.append(_with_href("".join(n.get("text", "") for n in nodes[i:j]), href))
+            i = j
+        else:
+            out.append(adf_to_text(nodes[i]))
+            i += 1
+    return "".join(out)
+
+
+def _indent(text: str, pad: str) -> str:
+    return "".join(pad + line if line.strip() else line for line in text.splitlines(True))
+
+
+def _list_entry(marker: str, body: str) -> str:
+    """One list item: the marker on the first line, later lines indented under it."""
+    first, _, rest = body.strip("\n").partition("\n")
+    entry = (marker + first).rstrip(" ") + "\n" if not first.strip() else marker + first + "\n"
+    if rest:
+        entry += _indent(rest + "\n", " " * len(marker))
+    return entry
 
 
 def _parse_date(text: str, schema_type: str):
