@@ -3,6 +3,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -18,7 +19,16 @@ FIELDS = [
     {"id": "labels", "name": "Labels", "schema": {"type": "array"}},
     {"id": "customfield_10002", "name": "Story Points", "schema": {"type": "number"}},
     {"id": "description", "name": "Description", "schema": {"type": "string"}},
+    {"id": "customfield_10003", "name": "Severity", "custom": True, "schema": {"type": "option"}},
+    {"id": "customfield_10099", "name": "Old Unused Field", "custom": True, "schema": {"type": "string"}},
 ]
+
+PROJECT = {"id": "10000", "key": "ABC", "name": "Alpha Beta"}
+# Create screens per issue type: Severity is offered on Bug but never filled in.
+CREATE_SCREENS = {
+    "1": ("Bug", ["summary", "description", "duedate", "customfield_10003"]),
+    "2": ("Story", ["summary", "labels", "customfield_10002"]),
+}
 
 ADF_DESC = {"type": "doc", "version": 1, "content": [
     {"type": "paragraph", "content": [{"type": "text", "text": "Hello "},
@@ -78,7 +88,40 @@ class FakeJira(BaseHTTPRequestHandler):
             return self._send(200, {"name": "alice", "displayName": "Alice A"})
         if self.path == ("/rest/api/3/field" if cloud else "/rest/api/2/field"):
             return self._send(200, FIELDS)
+        url = urlparse(self.path)
+        parts = url.path.split("/")[4:]  # after /rest/api/<n>/
+        if url.path.startswith("/rest/api/3/" if cloud else "/rest/api/2/"):
+            if parts[:1] == ["project"] and len(parts) == 2:
+                if parts[1] in (PROJECT["key"], PROJECT["id"]):
+                    return self._send(200, PROJECT)
+                return self._send(404, {"errorMessages": ["No project could be found"]})
+            if parts[:2] == ["issue", "createmeta"] and len(parts) in (4, 5):
+                return self._createmeta(parts, parse_qs(url.query), cloud)
         self._send(404, {"errorMessages": ["not found"]})
+
+    def _createmeta(self, parts, query, cloud):
+        if parts[2] != PROJECT["key"] or parts[3] != "issuetypes":
+            return self._send(404, {"errorMessages": ["not found"]})
+        if self.server.createmeta_status:
+            return self._send(self.server.createmeta_status, {"errorMessages": ["createmeta off"]})
+        if len(parts) == 4:
+            items = [{"id": k, "name": v[0], "subtask": False} for k, v in CREATE_SCREENS.items()]
+            key = "issueTypes" if cloud else "values"
+        else:
+            if parts[4] not in CREATE_SCREENS:
+                return self._send(404, {"errorMessages": ["no such issue type"]})
+            names = {f["id"]: f["name"] for f in FIELDS}
+            items = [{"fieldId": fid, "key": fid, "name": names[fid], "required": fid == "summary"}
+                     for fid in CREATE_SCREENS[parts[4]][1]]
+            key = "fields" if cloud else "values"
+        # Serve at most 2 per page so the client has to follow the paging.
+        start = int(query.get("startAt", ["0"])[0])
+        n = min(2, int(query.get("maxResults", ["50"])[0]))
+        page = {"startAt": start, "maxResults": n, "total": len(items), key: items[start:start + n]}
+        if not cloud:
+            page["isLast"] = start + n >= len(items)
+        self.server.requests.append((self.path, None))
+        self._send(200, page)
 
     def do_POST(self):
         if not self._authed():
@@ -116,6 +159,7 @@ def _serve(cloud):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeJira)
     srv.requests = []
     srv.cloud = cloud
+    srv.createmeta_status = None  # set to e.g. 404 to mimic Jira before 8.4
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

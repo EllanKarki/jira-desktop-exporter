@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Iterator
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -14,6 +14,10 @@ CLOUD = "cloud"
 
 class JiraError(Exception):
     """Raised when Jira returns an error or cannot be reached."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status, when Jira answered
 
 
 def guess_deployment(url: str) -> str:
@@ -68,9 +72,10 @@ class JiraClient:
             raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
 
         if resp.status_code in (401, 403):
-            raise JiraError(self._auth_error(resp, method, path))
+            raise JiraError(self._auth_error(resp, method, path), resp.status_code)
         if not resp.ok:
-            raise JiraError(f"Jira returned {resp.status_code}: {_error_text(resp)}")
+            raise JiraError(f"Jira returned {resp.status_code}: {_error_text(resp)}",
+                            resp.status_code)
         try:
             return resp.json()
         except ValueError as exc:
@@ -108,6 +113,43 @@ class JiraClient:
     def fields(self) -> list[dict]:
         """Return all fields (system and custom) visible to the user."""
         return self._request("GET", f"{self.api}/field")
+
+    def project(self, key: str) -> dict:
+        """Return a project by key or id; a clear error if it doesn't exist or isn't visible."""
+        try:
+            return self._request("GET", f"{self.api}/project/{quote(key, safe='')}")
+        except JiraError as exc:
+            if exc.status == 404:
+                raise JiraError(f"Project '{key}' was not found, or you don't have "
+                                "permission to see it.", 404) from exc
+            raise
+
+    def _paged_values(self, path: str, keys: tuple[str, ...]) -> list[dict]:
+        """Collect every page of a startAt/maxResults list endpoint."""
+        out, start = [], 0
+        while True:
+            data = self._request("GET", path, params={"startAt": start, "maxResults": 50})
+            items = next((data[k] for k in keys if isinstance(data.get(k), list)), [])
+            out.extend(items)
+            start += len(items)
+            total = data.get("total")
+            if not items or data.get("isLast") is True or (total is not None and start >= total):
+                return out
+            if data.get("isLast") is None and total is None and len(items) < 50:
+                return out
+
+    def create_issue_types(self, project_key: str) -> list[dict]:
+        """Issue types a user can create in the project (each has 'id' and 'name')."""
+        return self._paged_values(
+            f"{self.api}/issue/createmeta/{quote(project_key, safe='')}/issuetypes",
+            ("issueTypes", "values"))
+
+    def create_fields(self, project_key: str, issue_type_id: str) -> list[dict]:
+        """Fields on the create screen for one issue type ('fieldId', 'name', 'schema')."""
+        return self._paged_values(
+            f"{self.api}/issue/createmeta/{quote(project_key, safe='')}/issuetypes/"
+            f"{quote(issue_type_id, safe='')}",
+            ("fields", "values"))
 
     def search(
         self,

@@ -1,0 +1,193 @@
+"""Find the fields a Jira project uses, so users can build fields.json from them."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+from jira_exporter.jira_client import JiraClient, JiraError
+
+# The issue key is not a "field" in Jira's search results, but every export wants it.
+KEY_FIELD_IDS = {"issuekey", "key"}
+
+
+@dataclass
+class FieldUsage:
+    id: str
+    name: str
+    custom: bool = False
+    type: str = ""
+    # Issue types whose create screen in this project offers the field.
+    issue_types: set[str] = field(default_factory=set)
+    # How many of the sampled issues have a non-empty value in it.
+    used_in: int = 0
+
+    @property
+    def is_key(self) -> bool:
+        return self.id in KEY_FIELD_IDS
+
+
+@dataclass
+class DiscoveryResult:
+    project_key: str
+    project_name: str
+    fields: list[FieldUsage]
+    sampled: int
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def relevant(self) -> list[FieldUsage]:
+        """Fields the project actually uses: on a create screen or filled in somewhere."""
+        return [f for f in self.fields if f.is_key or f.issue_types or f.used_in]
+
+
+def has_value(value) -> bool:
+    """True when a field value carries information (not None/empty/an empty rich-text doc)."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, dict):
+        if value.get("type") == "doc":  # Cloud rich text: empty unless it has content
+            return bool(value.get("content"))
+        # Fields Jira always returns as a counter: comment/worklog pages, watches, votes.
+        for counter in ("total", "watchCount", "votes"):
+            if isinstance(value.get(counter), int) and not isinstance(value.get(counter), bool):
+                return value[counter] > 0
+        return len(value) > 0
+    return True
+
+
+def jql_for_project(project_key: str) -> str:
+    escaped = project_key.replace("\\", "\\\\").replace('"', '\\"')
+    return f'project = "{escaped}" ORDER BY updated DESC'
+
+
+def discover_fields(
+    client: JiraClient,
+    project_key: str,
+    sample_size: int = 200,
+    progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> DiscoveryResult:
+    """Combine three sources: all fields Jira knows, the project's create screens,
+    and which fields are filled in on the project's most recently updated issues."""
+    say = progress or (lambda _msg: None)
+    stop = cancelled or (lambda: False)
+    project_key = project_key.strip()
+
+    project = client.project(project_key)
+    project_key = project.get("key", project_key)
+    say(f"Reading the field list for {project_key}...")
+
+    by_id: dict[str, FieldUsage] = {}
+    for f in client.fields():
+        schema = f.get("schema") or {}
+        kind = schema.get("type", "")
+        if kind == "array" and schema.get("items"):
+            kind = f"array of {schema['items']}"
+        by_id[f["id"]] = FieldUsage(f["id"], f.get("name", f["id"]), bool(f.get("custom")), kind)
+    if not any(i in by_id for i in KEY_FIELD_IDS):
+        by_id["issuekey"] = FieldUsage("issuekey", "Key")
+
+    warnings: list[str] = []
+    try:
+        issue_types = client.create_issue_types(project_key)
+        for it in issue_types:
+            if stop():
+                break
+            say(f"Reading create screen fields for {it.get('name', it.get('id'))}...")
+            for cf in client.create_fields(project_key, str(it["id"])):
+                fid = cf.get("fieldId") or cf.get("key") or cf.get("id")
+                if not fid:
+                    continue
+                usage = by_id.setdefault(fid, FieldUsage(fid, cf.get("name", fid)))
+                usage.issue_types.add(it.get("name", str(it["id"])))
+    except JiraError as exc:
+        # The sample below still shows which fields are filled in.
+        if exc.status == 404:
+            warnings.append("This Jira has no per-project create screen lookup (Data Center "
+                            "added it in 8.4), so the list is based on the sampled issues.")
+        else:
+            reason = str(exc).splitlines()[0]
+            warnings.append(f"Could not read the project's create screens ({reason}), so the "
+                            "list is based on the sampled issues.")
+
+    sampled = 0
+    if sample_size > 0 and not stop():
+        say("Checking which fields recent issues use...")
+        for issue in client.search(jql_for_project(project_key), ["*all"],
+                                   page_size=min(100, sample_size), cancelled=stop):
+            sampled += 1
+            for fid, value in (issue.get("fields") or {}).items():
+                if has_value(value):
+                    usage = by_id.setdefault(fid, FieldUsage(fid, fid))
+                    usage.used_in += 1
+            if sampled % 50 == 0:
+                say(f"Checked {sampled} issues...")
+            if sampled >= sample_size:
+                break
+        for key_id in KEY_FIELD_IDS:
+            if key_id in by_id:
+                by_id[key_id].used_in = sampled
+
+    fields = sorted(by_id.values(),
+                    key=lambda f: (not f.is_key, -f.used_in, not f.issue_types, f.name.lower()))
+    return DiscoveryResult(project_key, project.get("name", project_key), fields, sampled, warnings)
+
+
+def config_entries(selected: list[FieldUsage]) -> list[dict]:
+    """fields.json entries: by id (unambiguous), with the Jira name as the column header."""
+    entries = []
+    for f in selected:
+        if f.is_key:
+            entries.append({"id": "key", "header": "Issue Key"})
+        else:
+            entries.append({"id": f.id, "header": f.name})
+    return entries
+
+
+def write_config(path: Path, selected: list[FieldUsage], template: Path | None = None) -> None:
+    """Write a fields.json for `selected`, keeping other settings from `template` if given."""
+    data: dict = {}
+    if template and Path(template).is_file():
+        try:
+            data = json.loads(Path(template).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("_comment", "Fields exported to Excel, in column order. Generated by "
+                                "'Discover fields'; edit freely.")
+    data.setdefault("max_results_per_page", 100)
+    data["fields"] = config_entries(selected)
+    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def write_field_list_xlsx(path: Path, result: DiscoveryResult) -> None:
+    """Save the full field list (used and unused) for reference."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{result.project_key} fields"[:31]
+    headers = ["Field name", "Field id", "Custom", "Type",
+               f"Issues with a value (of {result.sampled} checked)", "On create screen for"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E78")
+    for f in result.fields:
+        ws.append([f.name, "key" if f.is_key else f.id, "Yes" if f.custom else "No", f.type,
+                   f.used_in, ", ".join(sorted(f.issue_types))])
+    for i, width in enumerate([32, 22, 8, 20, 18, 40], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    wb.save(path)
