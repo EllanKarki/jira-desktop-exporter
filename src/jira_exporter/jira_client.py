@@ -18,7 +18,10 @@ class JiraError(Exception):
 
 def guess_deployment(url: str) -> str:
     """Atlassian-hosted sites live on *.atlassian.net; anything else is assumed self-hosted."""
-    host = urlparse(url if "://" in url else "https://" + url).hostname or ""
+    try:
+        host = urlparse(url if "://" in url else "https://" + url).hostname or ""
+    except ValueError:  # e.g. a stray "]" makes urlparse reject the host
+        return DATA_CENTER
     return CLOUD if host.endswith(".atlassian.net") else DATA_CENTER
 
 
@@ -132,7 +135,8 @@ class JiraClient:
             yield from issues
             done += len(issues)
             if progress:
-                progress(done, max(total, done))
+                # The count is approximate, so never report fewer than fetched.
+                progress(done, max(total, done) if total else 0)
             token = data.get("nextPageToken")
             if not issues or not token or data.get("isLast"):
                 return

@@ -77,9 +77,17 @@ class ExportWorker(QObject):
         super().__init__()
         self.client, self.config, self.jql, self.out_path = client, config, jql, out_path
         self._cancel = False
+        self.stopped_early = False
 
     def cancel(self):
         self._cancel = True
+
+    def _should_stop(self) -> bool:
+        # Checked before each page request, so this is only True when pages were skipped;
+        # a Cancel click during the last page still produces a complete file.
+        if self._cancel:
+            self.stopped_early = True
+        return self._cancel
 
     @Slot()
     def run(self):
@@ -97,10 +105,10 @@ class ExportWorker(QObject):
             issues = self.client.search(
                 self.jql, ids, self.config.page_size,
                 progress=lambda done, total: self.progress.emit(done, total),
-                cancelled=lambda: self._cancel,
+                cancelled=self._should_stop,
             )
             count = write_xlsx(self.out_path, fields, issues)
-            if self._cancel:
+            if self.stopped_early:
                 self.log.emit("Export cancelled; the file holds the issues fetched so far.")
             self.finished.emit(count, str(self.out_path))
         except (JiraError, ConfigError) as exc:
@@ -136,8 +144,15 @@ class LoginPage(QWidget):
         self.deployment = QComboBox()
         self.deployment.addItem("Jira Data Center / Server", DATA_CENTER)
         self.deployment.addItem("Jira Cloud", CLOUD)
-        self.deployment.setCurrentIndex(
-            max(0, self.deployment.findData(settings.value("deployment", DATA_CENTER))))
+        saved_url = settings.value("url", "")
+        # Settings saved before Cloud support have no type; guess it from the URL.
+        initial = settings.value("deployment") if settings.contains("deployment") \
+            else guess_deployment(saved_url) if saved_url else DATA_CENTER
+        self.deployment.setCurrentIndex(max(0, self.deployment.findData(initial)))
+        # True while "Cloud" is selected only because the URL ends in .atlassian.net.
+        # A Cloud choice made by hand (e.g. a custom domain) is never undone by the URL.
+        self._cloud_from_url = initial == CLOUD and guess_deployment(saved_url) == CLOUD
+        self.deployment.activated.connect(self._type_picked)
         self.deployment.currentIndexChanged.connect(self._update_labels)
         self.username = QLineEdit(settings.value("username", ""))
         self.password = QLineEdit()
@@ -182,10 +197,20 @@ class LoginPage(QWidget):
     def _is_cloud(self) -> bool:
         return self.deployment.currentData() == CLOUD
 
+    def _type_picked(self, _index):
+        self._cloud_from_url = False
+
     def _guess_deployment(self):
         url = self.url.text().strip()
-        if url:
-            self.deployment.setCurrentIndex(self.deployment.findData(guess_deployment(url)))
+        if not url:
+            return
+        if guess_deployment(url) == CLOUD:
+            if not self._is_cloud():  # only take credit for a switch the URL made
+                self.deployment.setCurrentIndex(self.deployment.findData(CLOUD))
+                self._cloud_from_url = True
+        elif self._cloud_from_url:
+            self.deployment.setCurrentIndex(self.deployment.findData(DATA_CENTER))
+            self._cloud_from_url = False
 
     def _update_labels(self, *_):
         cloud = self._is_cloud()
@@ -288,6 +313,8 @@ class ExportPage(QWidget):
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
+        # A busy (indeterminate) bar draws no text, so the count also goes here.
+        self.progress_label = QLabel()
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
 
@@ -296,6 +323,7 @@ class ExportPage(QWidget):
         box.addLayout(form)
         box.addLayout(btns)
         box.addWidget(self.progress)
+        box.addWidget(self.progress_label)
         box.addWidget(self.log, 1)
 
     def set_session(self, client: JiraClient, user: dict):
@@ -305,6 +333,10 @@ class ExportPage(QWidget):
         self.user_label.setText(
             f"Connected to <b>{client.base_url}</b> ({kind}) as <b>{name}</b>")
         self.log.clear()
+        self.progress_label.clear()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
 
     def _pick_config(self):
         path, _ = QFileDialog.getOpenFileName(self, "Fields config", self.config_path.text(),
@@ -342,6 +374,7 @@ class ExportPage(QWidget):
 
         self.log.clear()
         self.progress.setRange(0, 0)  # busy until the first page reports a total
+        self.progress_label.setText("Starting export...")
         self.export_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self._worker = ExportWorker(self.client, config, jql, out)
@@ -357,24 +390,40 @@ class ExportPage(QWidget):
             self.cancel_btn.setEnabled(False)
 
     def _on_progress(self, done, total):
+        if total <= 0:  # total unknown (Cloud count unavailable): stay in busy mode
+            self.progress.setRange(0, 0)
+            self.progress_label.setText(f"{done} issues fetched (total unknown)")
+            return
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
         self.progress.setFormat(f"{done} / {total} issues")
+        self.progress_label.setText(f"{done} of {total} issues fetched")
 
     def _reset(self):
         self._thread.quit()
         self.export_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-        if self.progress.maximum() == 0:
+        if self.progress.maximum() == 0:  # leave busy mode
             self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.progress.setFormat("%p%")
 
     def _on_finished(self, count, path):
+        cancelled = self._worker.stopped_early
         self._reset()
+        if cancelled:
+            self.progress_label.setText(f"Cancelled: {count} issues saved")
+        else:
+            self.progress.setRange(0, max(count, 1))
+            self.progress.setValue(count)
+            self.progress.setFormat(f"{count} issues")
+            self.progress_label.setText(f"Done: {count} issues saved")
         self.log.appendPlainText(f"Done: {count} issues written to {path}")
         QMessageBox.information(self, "Export complete", f"{count} issues saved to:\n{path}")
 
     def _on_failed(self, msg):
         self._reset()
+        self.progress_label.setText("Export failed")
         self.log.appendPlainText(f"Error: {msg}")
         QMessageBox.critical(self, "Export failed", msg)
 

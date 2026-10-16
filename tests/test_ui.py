@@ -88,3 +88,152 @@ def test_cloud_login_then_export(cloud_server, tmp_path, monkeypatch):
     ep.export_btn.click()
     wait_until(qapp, lambda: "Done: 250 issues" in ep.log.toPlainText())
     assert load_workbook(out).active.max_row == 251
+
+
+def _fresh_settings(tmp_path):
+    for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
+        QSettings.setPath(fmt, QSettings.UserScope, str(tmp_path))
+    return QSettings("JiraDesktopExporter", "JiraDesktopExporter")
+
+
+def test_type_guessed_from_settings_saved_before_cloud_support(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://acme.atlassian.net")
+    s.setValue("use_token", True)
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    assert lp.deployment.currentData() == "cloud"
+    assert lp.secret_label.text() == "API token"
+
+
+def test_saved_type_wins_over_url_guess(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://jira.acme.com")
+    s.setValue("deployment", "cloud")  # Cloud on a custom domain, chosen by hand
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    assert lp.deployment.currentData() == "cloud"
+    lp.url.setText("https://jira2.acme.com")  # editing the URL keeps the manual choice
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+
+
+def test_url_guess_switches_back_only_when_it_chose_cloud(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    lp.url.setText("https://acme.atlassian.net")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+    lp.url.setText("https://jira.acme.com")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "datacenter"
+    # Picking Cloud by hand for a custom domain sticks through URL edits.
+    lp.deployment.setCurrentIndex(lp.deployment.findData("cloud"))
+    lp.deployment.activated.emit(lp.deployment.currentIndex())
+    lp.url.setText("https://jira.acme.org")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+
+
+def test_progress_without_total_stays_busy(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+    ep._on_progress(100, 0)
+    assert ep.progress.maximum() == 0
+    assert ep.progress_label.text() == "100 issues fetched (total unknown)"
+    ep._on_progress(100, 250)
+    assert ep.progress.maximum() == 250
+    assert ep.progress_label.text() == "100 of 250 issues fetched"
+
+
+def test_guess_deployment_survives_malformed_saved_url(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://jira.acme.com]")
+    s.setValue("deployment", "cloud")
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    assert win.login.deployment.currentData() == "cloud"
+
+
+def test_url_round_trip_keeps_manual_cloud_choice(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    lp.url.setText("https://jira.acme.com")
+    lp._guess_deployment()
+    lp.deployment.setCurrentIndex(lp.deployment.findData("cloud"))
+    lp.deployment.activated.emit(lp.deployment.currentIndex())
+    for url in ("https://acme.atlassian.net", "https://jira.acme.com"):
+        lp.url.setText(url)
+        lp._guess_deployment()
+        assert lp.deployment.currentData() == "cloud"
+
+
+def test_cancelled_export_does_not_show_full_bar(tmp_path, monkeypatch):
+    _fresh_settings(tmp_path)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+
+    class FakeWorker:
+        stopped_early = True
+
+    class FakeThread:
+        def quit(self):
+            pass
+
+    ep._worker, ep._thread = FakeWorker(), FakeThread()
+    ep._on_progress(100, 250)
+    ep._on_finished(100, "/tmp/x.xlsx")
+    assert ep.progress.value() == 100 and ep.progress.maximum() == 250
+    assert ep.progress_label.text() == "Cancelled: 100 issues saved"
+
+
+def test_cancel_during_last_page_reports_complete_export(jira_server, tmp_path, monkeypatch):
+    """Cancel only counts when pages were actually skipped."""
+    from jira_exporter.config import load_config
+    from jira_exporter.jira_client import Credentials, JiraClient
+
+    client = JiraClient(Credentials(f"http://127.0.0.1:{jira_server.server_address[1]}",
+                                    "alice", "secret"))
+    cfg = load_config(ROOT / "config" / "fields.json")
+    worker = appmod.ExportWorker(client, cfg, "project = ABC", tmp_path / "o.xlsx")
+    worker.progress.connect(lambda done, total: done >= 250 and worker.cancel())
+    done = []
+    worker.finished.connect(lambda n, p: done.append(n))
+    worker.run()
+    assert done == [250] and worker._cancel and not worker.stopped_early
+
+    worker = appmod.ExportWorker(client, cfg, "project = ABC", tmp_path / "p.xlsx")
+    worker.progress.connect(lambda done, total: done >= 100 and worker.cancel())
+    done = []
+    worker.finished.connect(lambda n, p: done.append(n))
+    worker.run()
+    assert done == [100] and worker.stopped_early
+
+
+def test_relogin_clears_previous_result(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+    ep._on_progress(250, 250)
+    ep.progress_label.setText("Done: 250 issues saved")
+
+    class FakeClient:
+        base_url, is_cloud = "https://jira.acme.com", False
+
+    ep.set_session(FakeClient(), {"displayName": "Bob"})
+    assert ep.progress_label.text() == ""
+    assert ep.progress.value() == 0
