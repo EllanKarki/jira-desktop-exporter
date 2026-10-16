@@ -67,16 +67,8 @@ class JiraClient:
         except requests.exceptions.RequestException as exc:
             raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
 
-        if resp.status_code == 401:
-            if self.is_cloud:
-                raise JiraError("Login failed: check your email and API token.")
-            raise JiraError("Login failed: check your username and password/token.")
-        if resp.status_code == 403:
-            hint = ""
-            if resp.headers.get("X-Authentication-Denied-Reason"):
-                hint = (" Jira asked for a CAPTCHA; log in once through the browser, "
-                        "then try again.")
-            raise JiraError(f"Access denied by Jira (403).{hint}")
+        if resp.status_code in (401, 403):
+            raise JiraError(self._auth_error(resp, method, path))
         if not resp.ok:
             raise JiraError(f"Jira returned {resp.status_code}: {_error_text(resp)}")
         try:
@@ -86,6 +78,24 @@ class JiraClient:
                 "Jira returned a non-JSON response. Check the URL points to your Jira "
                 "base address (for example https://jira.company.com)."
             ) from exc
+
+    def _auth_error(self, resp: requests.Response, method: str, path: str) -> str:
+        """Explain a 401/403, including Jira's own reason so the user can act on it."""
+        if resp.status_code == 401:
+            head = ("Login failed: check your email and API token." if self.is_cloud
+                    else "Login failed: check your username and password/token.")
+        else:
+            head = "Access denied by Jira (403)."
+        lines = [head]
+        detail = _error_text(resp)
+        if detail:
+            lines.append(f"Jira says: {detail}")
+        if resp.headers.get("X-Authentication-Denied-Reason") or \
+                "CAPTCHA" in resp.headers.get("X-Seraph-LoginReason", "").upper():
+            lines.append("Jira wants a CAPTCHA after failed logins: log out and back in "
+                         "once in your browser, then try again.")
+        lines.append(f"(Request: {method} {path})")
+        return "\n".join(lines)
 
     @property
     def is_cloud(self) -> bool:
@@ -175,10 +185,21 @@ class JiraClient:
 
 
 def _error_text(resp: requests.Response) -> str:
+    """Pull a readable message out of a Jira (or Atlassian gateway) error response."""
     try:
         body = resp.json()
     except ValueError:
-        return resp.text[:300]
-    msgs = list(body.get("errorMessages", []))
-    msgs += [f"{k}: {v}" for k, v in (body.get("errors") or {}).items()]
-    return "; ".join(msgs) or resp.text[:300]
+        text = resp.text or ""
+        if "<html" in text[:500].lower():  # an HTML error page says nothing useful here
+            return ""
+        return " ".join(text.split())[:300]
+    if not isinstance(body, dict):
+        return str(body)[:300]
+    msgs = [str(m) for m in body.get("errorMessages") or []]
+    errors = body.get("errors")
+    if isinstance(errors, dict):
+        msgs += [f"{k}: {v}" for k, v in errors.items()]
+    for key in ("message", "error_description", "error"):  # gateway-style bodies
+        if isinstance(body.get(key), str) and body[key] not in msgs:
+            msgs.append(body[key])
+    return "; ".join(msgs)[:500]

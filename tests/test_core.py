@@ -229,3 +229,42 @@ def test_cloud_progress_when_count_unavailable(cloud_server, monkeypatch):
 
 def test_guess_deployment_malformed_url():
     assert guess_deployment("https://jira.acme.com]") == DATA_CENTER
+
+
+def _fake_response(status, body=None, headers=None, text=None):
+    import json as _json
+    import requests
+    r = requests.Response()
+    r.status_code = status
+    r._content = (text if text is not None else _json.dumps(body)).encode()
+    r.headers.update(headers or {})
+    return r
+
+
+@pytest.mark.parametrize("status, body, headers, expected", [
+    (403, {"errorMessages": ["You do not have permission to access this site."]}, {},
+     ["Access denied by Jira (403).", "Jira says: You do not have permission to access this site.",
+      "(Request: GET /rest/api/3/myself)"]),
+    (403, {"message": "Client must be authenticated to access this resource.", "code": 403}, {},
+     ["Jira says: Client must be authenticated to access this resource."]),
+    (403, {}, {"X-Seraph-LoginReason": "AUTHENTICATION_DENIED",
+               "X-Authentication-Denied-Reason": "CAPTCHA_CHALLENGE; login-url=x"},
+     ["CAPTCHA"]),
+    (401, {"errorMessages": []}, {}, ["Login failed: check your email and API token."]),
+])
+def test_auth_errors_show_jira_reason(monkeypatch, status, body, headers, expected):
+    c = JiraClient(Credentials("https://acme.atlassian.net", "a@b.c", "tok", deployment=CLOUD))
+    monkeypatch.setattr(c.session, "request", lambda *a, **k: _fake_response(status, body, headers))
+    with pytest.raises(JiraError) as exc:
+        c.myself()
+    for part in expected:
+        assert part in str(exc.value)
+
+
+def test_auth_error_ignores_html_body(monkeypatch):
+    c = JiraClient(Credentials("https://jira.acme.com", "a", "b"))
+    monkeypatch.setattr(c.session, "request",
+                        lambda *a, **k: _fake_response(403, text="<html><body>Forbidden</body></html>"))
+    with pytest.raises(JiraError) as exc:
+        c.myself()
+    assert "Jira says" not in str(exc.value) and "<html" not in str(exc.value)

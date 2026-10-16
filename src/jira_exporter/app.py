@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -261,7 +262,10 @@ class LoginPage(QWidget):
 
     def _fail(self, msg):
         self._done()
-        self.status.setText(f"<span style='color:#c0392b'>{msg}</span>")
+        # Jira's own text may contain markup characters; show it literally, line by line.
+        safe = html.escape(msg).replace("\n", "<br>")
+        self.status.setText(f"<span style='color:#c0392b'>{safe}</span>")
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
 
 class ExportPage(QWidget):
