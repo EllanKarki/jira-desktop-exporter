@@ -77,9 +77,17 @@ class ExportWorker(QObject):
         super().__init__()
         self.client, self.config, self.jql, self.out_path = client, config, jql, out_path
         self._cancel = False
+        self.stopped_early = False
 
     def cancel(self):
         self._cancel = True
+
+    def _should_stop(self) -> bool:
+        # Checked before each page request, so this is only True when pages were skipped;
+        # a Cancel click during the last page still produces a complete file.
+        if self._cancel:
+            self.stopped_early = True
+        return self._cancel
 
     @Slot()
     def run(self):
@@ -97,10 +105,10 @@ class ExportWorker(QObject):
             issues = self.client.search(
                 self.jql, ids, self.config.page_size,
                 progress=lambda done, total: self.progress.emit(done, total),
-                cancelled=lambda: self._cancel,
+                cancelled=self._should_stop,
             )
             count = write_xlsx(self.out_path, fields, issues)
-            if self._cancel:
+            if self.stopped_early:
                 self.log.emit("Export cancelled; the file holds the issues fetched so far.")
             self.finished.emit(count, str(self.out_path))
         except (JiraError, ConfigError) as exc:
@@ -325,6 +333,10 @@ class ExportPage(QWidget):
         self.user_label.setText(
             f"Connected to <b>{client.base_url}</b> ({kind}) as <b>{name}</b>")
         self.log.clear()
+        self.progress_label.clear()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
 
     def _pick_config(self):
         path, _ = QFileDialog.getOpenFileName(self, "Fields config", self.config_path.text(),
@@ -397,7 +409,7 @@ class ExportPage(QWidget):
             self.progress.setFormat("%p%")
 
     def _on_finished(self, count, path):
-        cancelled = self._worker._cancel
+        cancelled = self._worker.stopped_early
         self._reset()
         if cancelled:
             self.progress_label.setText(f"Cancelled: {count} issues saved")

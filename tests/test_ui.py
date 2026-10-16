@@ -187,7 +187,7 @@ def test_cancelled_export_does_not_show_full_bar(tmp_path, monkeypatch):
     ep = win.export
 
     class FakeWorker:
-        _cancel = True
+        stopped_early = True
 
     class FakeThread:
         def quit(self):
@@ -198,3 +198,42 @@ def test_cancelled_export_does_not_show_full_bar(tmp_path, monkeypatch):
     ep._on_finished(100, "/tmp/x.xlsx")
     assert ep.progress.value() == 100 and ep.progress.maximum() == 250
     assert ep.progress_label.text() == "Cancelled: 100 issues saved"
+
+
+def test_cancel_during_last_page_reports_complete_export(jira_server, tmp_path, monkeypatch):
+    """Cancel only counts when pages were actually skipped."""
+    from jira_exporter.config import load_config
+    from jira_exporter.jira_client import Credentials, JiraClient
+
+    client = JiraClient(Credentials(f"http://127.0.0.1:{jira_server.server_address[1]}",
+                                    "alice", "secret"))
+    cfg = load_config(ROOT / "config" / "fields.json")
+    worker = appmod.ExportWorker(client, cfg, "project = ABC", tmp_path / "o.xlsx")
+    worker.progress.connect(lambda done, total: done >= 250 and worker.cancel())
+    done = []
+    worker.finished.connect(lambda n, p: done.append(n))
+    worker.run()
+    assert done == [250] and worker._cancel and not worker.stopped_early
+
+    worker = appmod.ExportWorker(client, cfg, "project = ABC", tmp_path / "p.xlsx")
+    worker.progress.connect(lambda done, total: done >= 100 and worker.cancel())
+    done = []
+    worker.finished.connect(lambda n, p: done.append(n))
+    worker.run()
+    assert done == [100] and worker.stopped_early
+
+
+def test_relogin_clears_previous_result(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+    ep._on_progress(250, 250)
+    ep.progress_label.setText("Done: 250 issues saved")
+
+    class FakeClient:
+        base_url, is_cloud = "https://jira.acme.com", False
+
+    ep.set_session(FakeClient(), {"displayName": "Bob"})
+    assert ep.progress_label.text() == ""
+    assert ep.progress.value() == 0
