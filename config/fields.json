@@ -1,0 +1,17 @@
+{
+  "_comment": "Fields exported to Excel, in column order. Use either the Jira field 'id' (e.g. customfield_10002) or its display 'name' as shown in Jira. 'header' is optional and overrides the Excel column title.",
+  "max_results_per_page": 100,
+  "fields": [
+    { "id": "key", "header": "Issue Key" },
+    { "name": "Summary" },
+    { "name": "Issue Type" },
+    { "name": "Status" },
+    { "name": "Priority" },
+    { "name": "Assignee" },
+    { "name": "Reporter" },
+    { "name": "Created" },
+    { "name": "Updated" },
+    { "name": "Fix Version/s" },
+    { "name": "Labels" }
+  ]
+}
