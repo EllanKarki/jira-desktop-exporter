@@ -15,6 +15,13 @@ from jira_exporter.jira_client import JiraClient, JiraError
 
 # The issue key is not a "field" in Jira's search results, but every export wants it.
 KEY_FIELD_IDS = {"issuekey", "key"}
+# System fields whose values don't fit in one Excel cell (they'd export as raw data),
+# so they are listed but not ticked by default.
+NOT_SUGGESTED = {"comment", "worklog", "watches", "votes", "attachment", "issuelinks",
+                 "progress", "aggregateprogress", "timetracking", "issuerestriction"}
+# Keys that describe a value rather than being one.
+_META_KEYS = {"self", "iconUrl", "avatarUrls", "showField", "nonEditableReason",
+              "shouldDisplay"}
 
 
 @dataclass
@@ -31,6 +38,11 @@ class FieldUsage:
     @property
     def is_key(self) -> bool:
         return self.id in KEY_FIELD_IDS
+
+    @property
+    def suggested(self) -> bool:
+        """Ticked by default: the key, and fields with values that export well."""
+        return self.is_key or (self.used_in > 0 and self.id not in NOT_SUGGESTED)
 
 
 @dataclass
@@ -52,7 +64,7 @@ def has_value(value) -> bool:
     if value is None:
         return False
     if isinstance(value, str):
-        return value.strip() != ""
+        return value.strip() not in ("", "{}")  # Cloud's Development field sends "{}"
     if isinstance(value, (list, tuple, set)):
         return len(value) > 0
     if isinstance(value, dict):
@@ -62,7 +74,10 @@ def has_value(value) -> bool:
         for counter in ("total", "watchCount", "votes"):
             if isinstance(value.get(counter), int) and not isinstance(value.get(counter), bool):
                 return value[counter] > 0
-        return len(value) > 0
+        # Otherwise a dict counts if anything in it, other than metadata, has a value
+        # (so placeholders like {"issuerestrictions": {}, "shouldDisplay": false} don't).
+        return any(has_value(v) for k, v in value.items()
+                   if k not in _META_KEYS and not isinstance(v, bool))
     return True
 
 
@@ -86,6 +101,9 @@ def discover_fields(
 
     project = client.project(project_key)
     project_key = project.get("key", project_key)
+    project_name = project.get("name", project_key)
+    if stop():
+        return DiscoveryResult(project_key, project_name, [], 0, [])
     say(f"Reading the field list for {project_key}...")
 
     by_id: dict[str, FieldUsage] = {}
@@ -100,12 +118,12 @@ def discover_fields(
 
     warnings: list[str] = []
     try:
-        issue_types = client.create_issue_types(project_key)
+        issue_types = [] if stop() else client.create_issue_types(project_key, cancelled=stop)
         for it in issue_types:
             if stop():
                 break
             say(f"Reading create screen fields for {it.get('name', it.get('id'))}...")
-            for cf in client.create_fields(project_key, str(it["id"])):
+            for cf in client.create_fields(project_key, str(it["id"]), cancelled=stop):
                 fid = cf.get("fieldId") or cf.get("key") or cf.get("id")
                 if not fid:
                     continue
@@ -113,13 +131,14 @@ def discover_fields(
                 usage.issue_types.add(it.get("name", str(it["id"])))
     except JiraError as exc:
         # The sample below still shows which fields are filled in.
-        if exc.status == 404:
-            warnings.append("This Jira has no per-project create screen lookup (Data Center "
-                            "added it in 8.4), so the list is based on the sampled issues.")
+        if exc.status == 404 and client.is_cloud:
+            reason = "Jira returned 404, which can mean you can't create issues in this project"
+        elif exc.status == 404:
+            reason = ("Jira returned 404: this lookup needs Data Center 8.4 or later, or you "
+                      "can't create issues in this project")
         else:
             reason = str(exc).splitlines()[0]
-            warnings.append(f"Could not read the project's create screens ({reason}), so the "
-                            "list is based on the sampled issues.")
+        warnings.append(f"Could not read the project's create screens ({reason}).")
 
     sampled = 0
     if sample_size > 0 and not stop():
@@ -128,6 +147,8 @@ def discover_fields(
                                    page_size=min(100, sample_size), cancelled=stop):
             sampled += 1
             for fid, value in (issue.get("fields") or {}).items():
+                if fid == "workratio" and isinstance(value, (int, float)) and value < 0:
+                    continue  # -1 means "no estimate"
                 if has_value(value):
                     usage = by_id.setdefault(fid, FieldUsage(fid, fid))
                     usage.used_in += 1
@@ -138,10 +159,13 @@ def discover_fields(
         for key_id in KEY_FIELD_IDS:
             if key_id in by_id:
                 by_id[key_id].used_in = sampled
+    if sampled == 0 and not stop():
+        warnings.append("No issues were checked, so only create screen fields are listed. "
+                        "Raise 'Issues to check' to see which fields are filled in.")
 
     fields = sorted(by_id.values(),
                     key=lambda f: (not f.is_key, -f.used_in, not f.issue_types, f.name.lower()))
-    return DiscoveryResult(project_key, project.get("name", project_key), fields, sampled, warnings)
+    return DiscoveryResult(project_key, project_name, fields, sampled, warnings)
 
 
 def config_entries(selected: list[FieldUsage]) -> list[dict]:
@@ -161,7 +185,7 @@ def write_config(path: Path, selected: list[FieldUsage], template: Path | None =
     if template and Path(template).is_file():
         try:
             data = json.loads(Path(template).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):  # unreadable, not UTF-8, or not JSON
             data = {}
     if not isinstance(data, dict):
         data = {}

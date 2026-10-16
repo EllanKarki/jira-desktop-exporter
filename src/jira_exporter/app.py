@@ -358,6 +358,7 @@ class ExportPage(QWidget):
         if self.client is None:
             return
         self.fields_dialog = FieldsDialog(self.client, self.settings, self.config_path.text(), self)
+        self.fields_dialog.setAttribute(Qt.WA_DeleteOnClose)
         self.fields_dialog.config_saved.connect(self._use_config)
         self.fields_dialog.open()
 
