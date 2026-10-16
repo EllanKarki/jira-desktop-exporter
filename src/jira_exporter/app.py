@@ -36,6 +36,7 @@ from jira_exporter.config import (
     resolve_fields,
 )
 from jira_exporter.exporter import write_xlsx
+from jira_exporter.fields_dialog import FieldsDialog
 from jira_exporter.jira_client import (
     CLOUD,
     DATA_CENTER,
@@ -289,9 +290,14 @@ class ExportPage(QWidget):
         self.config_path = QLineEdit(settings.value("config_path", str(default_config_path())))
         browse_cfg = QPushButton("Browse...")
         browse_cfg.clicked.connect(self._pick_config)
+        self.discover_btn = QPushButton("Discover fields...")
+        self.discover_btn.setToolTip("List the fields a project uses and save a fields.json from them")
+        self.discover_btn.clicked.connect(self._discover_fields)
+        self.fields_dialog: FieldsDialog | None = None
         cfg_row = QHBoxLayout()
         cfg_row.addWidget(self.config_path, 1)
         cfg_row.addWidget(browse_cfg)
+        cfg_row.addWidget(self.discover_btn)
 
         default_out = Path(settings.value("out_dir", str(Path.home()))) / "jira_export.xlsx"
         self.out_path = QLineEdit(str(default_out))
@@ -347,6 +353,18 @@ class ExportPage(QWidget):
                                               "JSON (*.json)")
         if path:
             self.config_path.setText(path)
+
+    def _discover_fields(self):
+        if self.client is None:
+            return
+        self.fields_dialog = FieldsDialog(self.client, self.settings, self.config_path.text(), self)
+        self.fields_dialog.config_saved.connect(self._use_config)
+        self.fields_dialog.open()
+
+    def _use_config(self, path: str):
+        self.config_path.setText(path)
+        self.settings.setValue("config_path", path)
+        self.log.appendPlainText(f"Fields config set to {path}")
 
     def _pick_output(self):
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
