@@ -88,3 +88,66 @@ def test_cloud_login_then_export(cloud_server, tmp_path, monkeypatch):
     ep.export_btn.click()
     wait_until(qapp, lambda: "Done: 250 issues" in ep.log.toPlainText())
     assert load_workbook(out).active.max_row == 251
+
+
+def _fresh_settings(tmp_path):
+    for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
+        QSettings.setPath(fmt, QSettings.UserScope, str(tmp_path))
+    return QSettings("JiraDesktopExporter", "JiraDesktopExporter")
+
+
+def test_type_guessed_from_settings_saved_before_cloud_support(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://acme.atlassian.net")
+    s.setValue("use_token", True)
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    assert lp.deployment.currentData() == "cloud"
+    assert lp.secret_label.text() == "API token"
+
+
+def test_saved_type_wins_over_url_guess(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://jira.acme.com")
+    s.setValue("deployment", "cloud")  # Cloud on a custom domain, chosen by hand
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    assert lp.deployment.currentData() == "cloud"
+    lp.url.setText("https://jira2.acme.com")  # editing the URL keeps the manual choice
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+
+
+def test_url_guess_switches_back_only_when_it_chose_cloud(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    lp = win.login
+    lp.url.setText("https://acme.atlassian.net")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+    lp.url.setText("https://jira.acme.com")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "datacenter"
+    # Picking Cloud by hand for a custom domain sticks through URL edits.
+    lp.deployment.setCurrentIndex(lp.deployment.findData("cloud"))
+    lp.deployment.activated.emit(lp.deployment.currentIndex())
+    lp.url.setText("https://jira.acme.org")
+    lp._guess_deployment()
+    assert lp.deployment.currentData() == "cloud"
+
+
+def test_progress_without_total_stays_busy(tmp_path):
+    _fresh_settings(tmp_path)
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    ep = win.export
+    ep._on_progress(100, 0)
+    assert ep.progress.maximum() == 0
+    assert ep.progress.format() == "100 issues"
+    ep._on_progress(100, 250)
+    assert ep.progress.maximum() == 250

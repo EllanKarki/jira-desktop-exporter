@@ -136,8 +136,15 @@ class LoginPage(QWidget):
         self.deployment = QComboBox()
         self.deployment.addItem("Jira Data Center / Server", DATA_CENTER)
         self.deployment.addItem("Jira Cloud", CLOUD)
-        self.deployment.setCurrentIndex(
-            max(0, self.deployment.findData(settings.value("deployment", DATA_CENTER))))
+        saved_url = settings.value("url", "")
+        # Settings saved before Cloud support have no type; guess it from the URL.
+        initial = settings.value("deployment") if settings.contains("deployment") \
+            else guess_deployment(saved_url) if saved_url else DATA_CENTER
+        self.deployment.setCurrentIndex(max(0, self.deployment.findData(initial)))
+        # True while "Cloud" is selected only because the URL ends in .atlassian.net.
+        # A Cloud choice made by hand (e.g. a custom domain) is never undone by the URL.
+        self._cloud_from_url = initial == CLOUD and guess_deployment(saved_url) == CLOUD
+        self.deployment.activated.connect(self._type_picked)
         self.deployment.currentIndexChanged.connect(self._update_labels)
         self.username = QLineEdit(settings.value("username", ""))
         self.password = QLineEdit()
@@ -182,10 +189,19 @@ class LoginPage(QWidget):
     def _is_cloud(self) -> bool:
         return self.deployment.currentData() == CLOUD
 
+    def _type_picked(self, _index):
+        self._cloud_from_url = False
+
     def _guess_deployment(self):
         url = self.url.text().strip()
-        if url:
-            self.deployment.setCurrentIndex(self.deployment.findData(guess_deployment(url)))
+        if not url:
+            return
+        if guess_deployment(url) == CLOUD:
+            self.deployment.setCurrentIndex(self.deployment.findData(CLOUD))
+            self._cloud_from_url = True
+        elif self._cloud_from_url:
+            self.deployment.setCurrentIndex(self.deployment.findData(DATA_CENTER))
+            self._cloud_from_url = False
 
     def _update_labels(self, *_):
         cloud = self._is_cloud()
@@ -357,6 +373,10 @@ class ExportPage(QWidget):
             self.cancel_btn.setEnabled(False)
 
     def _on_progress(self, done, total):
+        if total <= 0:  # total unknown (Cloud count unavailable): stay in busy mode
+            self.progress.setRange(0, 0)
+            self.progress.setFormat(f"{done} issues")
+            return
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
         self.progress.setFormat(f"{done} / {total} issues")
@@ -370,6 +390,9 @@ class ExportPage(QWidget):
 
     def _on_finished(self, count, path):
         self._reset()
+        self.progress.setRange(0, max(count, 1))
+        self.progress.setValue(count)
+        self.progress.setFormat(f"{count} issues")
         self.log.appendPlainText(f"Done: {count} issues written to {path}")
         QMessageBox.information(self, "Export complete", f"{count} issues saved to:\n{path}")
 

@@ -132,7 +132,8 @@ class JiraClient:
             yield from issues
             done += len(issues)
             if progress:
-                progress(done, max(total, done))
+                # The count is approximate, so never report fewer than fetched.
+                progress(done, max(total, done) if total else 0)
             token = data.get("nextPageToken")
             if not issues or not token or data.get("isLast"):
                 return

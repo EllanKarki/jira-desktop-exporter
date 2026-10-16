@@ -141,3 +141,72 @@ def test_cloud_bad_jql(cloud_server):
     c = JiraClient(Credentials(url(cloud_server), "alice", "secret", deployment=CLOUD))
     with pytest.raises(JiraError, match="Error in the JQL"):
         list(c.search("bad", ["summary"]))
+
+
+def _doc(*content):
+    return {"type": "doc", "version": 1, "content": list(content)}
+
+
+def _p(*content):
+    return {"type": "paragraph", "content": list(content)}
+
+
+def _t(text, **kw):
+    return dict(type="text", text=text, **kw)
+
+
+def _li(*content):
+    return {"type": "listItem", "content": list(content)}
+
+
+@pytest.mark.parametrize("doc, expected", [
+    (_doc(_p(_t("Steps:")), {"type": "orderedList", "attrs": {"order": 3},
+                             "content": [_li(_p(_t("third"))), _li(_p(_t("fourth")))]}),
+     "Steps:\n3. third\n4. fourth"),
+    (_doc({"type": "bulletList", "content": [
+        _li(_p(_t("parent")), {"type": "bulletList", "content": [_li(_p(_t("child")))]}),
+        _li(_p(_t("sibling")))]}),
+     "- parent\n  - child\n- sibling"),
+    (_doc({"type": "taskList", "content": [
+        {"type": "taskItem", "attrs": {"state": "TODO"}, "content": [_t("Update docs")]},
+        {"type": "taskItem", "attrs": {"state": "DONE"}, "content": [_t("Ping QA")]}]},
+        _p(_t("After"))),
+     "[ ] Update docs\n[x] Ping QA\nAfter"),
+    (_doc({"type": "decisionList", "content": [
+        {"type": "decisionItem", "content": [_t("Use Postgres")]},
+        {"type": "decisionItem", "content": [_t("Ship Friday")]}]}),
+     "Use Postgres\nShip Friday"),
+    (_doc(_p(_t("Due "), {"type": "date", "attrs": {"timestamp": "1767225600000"}})),
+     "Due 2026-01-01"),
+    (_doc(_p(_t("See "), _t("runbook", marks=[{"type": "link", "attrs": {"href": "https://w/r"}}])),
+          {"type": "blockCard", "attrs": {"url": "https://example.com/b"}}),
+     "See runbook (https://w/r)\nhttps://example.com/b"),
+    (_doc({"type": "table", "content": [
+        {"type": "tableRow", "content": [{"type": "tableHeader", "content": [_p(_t("env"))]},
+                                         {"type": "tableHeader", "content": [_p(_t("result"))]}]},
+        {"type": "tableRow", "content": [{"type": "tableCell", "content": [_p(_t("prod"))]},
+                                         {"type": "tableCell", "content": [_p(_t("fail")), _p(_t("see log"))]}]}]}),
+     "env | result\nprod | fail see log"),
+    (_doc({"type": "codeBlock", "content": [_t("    x = 1\n    y = 2")]}),
+     "    x = 1\n    y = 2"),
+    (_doc(), ""),
+])
+def test_adf_shapes(doc, expected):
+    assert format_value(doc) == expected
+
+
+def test_cloud_progress_when_count_unavailable(cloud_server, monkeypatch):
+    c = JiraClient(Credentials(url(cloud_server), "alice", "secret", deployment=CLOUD))
+    real = c._request
+
+    def no_count(method, path, **kw):
+        if path.endswith("/approximate-count"):
+            raise JiraError("Jira returned 503")
+        return real(method, path, **kw)
+
+    monkeypatch.setattr(c, "_request", no_count)
+    seen = []
+    n = sum(1 for _ in c.search("project = ABC", ["summary"], 100,
+                                progress=lambda d, t: seen.append((d, t))))
+    assert n == 250
+    assert seen == [(100, 0), (200, 0), (250, 0)]

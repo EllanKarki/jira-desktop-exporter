@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -24,7 +24,8 @@ def format_value(value: Any, schema_type: str | None = None) -> Any:
         return ", ".join(str(format_value(v)) for v in value if v is not None)
     if isinstance(value, dict):
         if value.get("type") == "doc":  # Cloud v3 rich text (Atlassian Document Format)
-            return format_value(adf_to_text(value).strip())
+            # Strip only blank lines so a leading code block keeps its indentation.
+            return format_value(adf_to_text(value).strip("\n"))
         for k in ("displayName", "name", "value", "key", "emailAddress"):
             if value.get(k) not in (None, ""):
                 text = str(value[k])
@@ -43,29 +44,56 @@ def format_value(value: Any, schema_type: str | None = None) -> Any:
     return value
 
 
-_ADF_BLOCKS = {"paragraph", "heading", "listItem", "blockquote", "codeBlock",
-               "tableRow", "panel", "rule"}
+_ADF_BLOCKS = {"paragraph", "heading", "blockquote", "codeBlock", "panel", "rule",
+               "taskItem", "decisionItem", "blockCard", "embedCard", "mediaSingle"}
 
 
-def adf_to_text(node: Any) -> str:
-    """Flatten an Atlassian Document Format tree into plain text."""
+def adf_to_text(node: Any, depth: int = 0) -> str:
+    """Flatten an Atlassian Document Format tree into plain text.
+
+    Lists keep their numbering and nesting (two spaces per level), table rows
+    become "a | b | c" lines, and link targets are kept next to their text.
+    """
     if isinstance(node, list):
-        return "".join(adf_to_text(n) for n in node)
+        return "".join(adf_to_text(n, depth) for n in node)
     if not isinstance(node, dict):
         return ""
     kind = node.get("type")
+    attrs = node.get("attrs") or {}
     if kind == "text":
-        return node.get("text", "")
+        text = node.get("text", "")
+        for mark in node.get("marks") or []:
+            href = (mark.get("attrs") or {}).get("href") if mark.get("type") == "link" else None
+            if href and href != text:
+                text = f"{text} ({href})"
+        return text
     if kind == "hardBreak":
         return "\n"
-    attrs = node.get("attrs") or {}
-    if kind in ("mention", "emoji", "status", "date", "inlineCard"):
-        return str(attrs.get("text") or attrs.get("shortName") or attrs.get("url") or "")
-    text = adf_to_text(node.get("content", []))
-    if kind == "listItem":
-        text = "- " + text.strip()
-    elif kind == "tableCell" or kind == "tableHeader":
-        text = text.strip() + " | "
+    if kind == "date":
+        try:
+            ts = int(attrs.get("timestamp")) / 1000
+            return datetime.fromtimestamp(ts, timezone.utc).date().isoformat()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return str(attrs.get("timestamp") or "")
+    if kind in ("mention", "emoji", "status", "inlineCard", "blockCard", "embedCard"):
+        text = str(attrs.get("text") or attrs.get("shortName") or attrs.get("url") or "")
+        return text + "\n" if kind in _ADF_BLOCKS else text
+    if kind in ("bulletList", "orderedList"):
+        first = attrs.get("order", 1) if kind == "orderedList" else None
+        lines = []
+        for i, item in enumerate(c for c in node.get("content", []) if isinstance(c, dict)):
+            marker = f"{first + i}. " if first is not None else "- "
+            body = adf_to_text(item.get("content", []), depth + 1).strip("\n")
+            lines.append("  " * depth + marker + body.lstrip(" ") + "\n")
+        return "".join(lines)
+    if kind == "taskItem":
+        box = "[x] " if attrs.get("state") == "DONE" else "[ ] "
+        return "  " * depth + box + adf_to_text(node.get("content", []), depth).strip("\n") + "\n"
+    if kind == "tableRow":
+        cells = [" ".join(adf_to_text(c.get("content", []), depth).split())
+                 for c in node.get("content", []) if isinstance(c, dict)]
+        return " | ".join(cells) + "\n"
+    text = adf_to_text(node.get("content", []), depth)
     if kind in _ADF_BLOCKS:
         text = text.rstrip("\n") + "\n"
     return text
