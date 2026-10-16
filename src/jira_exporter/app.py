@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QSettings, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -34,7 +35,14 @@ from jira_exporter.config import (
     resolve_fields,
 )
 from jira_exporter.exporter import write_xlsx
-from jira_exporter.jira_client import Credentials, JiraClient, JiraError
+from jira_exporter.jira_client import (
+    CLOUD,
+    DATA_CENTER,
+    Credentials,
+    JiraClient,
+    JiraError,
+    guess_deployment,
+)
 
 
 # ---------------------------------------------------------------- workers ---
@@ -123,13 +131,20 @@ class LoginPage(QWidget):
         self.settings = settings
 
         self.url = QLineEdit(settings.value("url", ""))
-        self.url.setPlaceholderText("https://jira.yourcompany.com")
+        self.url.setPlaceholderText("https://jira.yourcompany.com or https://yoursite.atlassian.net")
+        self.url.editingFinished.connect(self._guess_deployment)
+        self.deployment = QComboBox()
+        self.deployment.addItem("Jira Data Center / Server", DATA_CENTER)
+        self.deployment.addItem("Jira Cloud", CLOUD)
+        self.deployment.setCurrentIndex(
+            max(0, self.deployment.findData(settings.value("deployment", DATA_CENTER))))
+        self.deployment.currentIndexChanged.connect(self._update_labels)
         self.username = QLineEdit(settings.value("username", ""))
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         self.use_token = QCheckBox("Use a Personal Access Token instead of a password")
         self.use_token.setChecked(settings.value("use_token", False, type=bool))
-        self.use_token.toggled.connect(self._toggle_token)
+        self.use_token.toggled.connect(self._update_labels)
         self.verify_ssl = QCheckBox("Verify SSL certificate")
         self.verify_ssl.setChecked(settings.value("verify_ssl", True, type=bool))
         self.status = QLabel()
@@ -141,11 +156,14 @@ class LoginPage(QWidget):
 
         form = QFormLayout()
         form.addRow("Jira URL", self.url)
-        form.addRow("Username", self.username)
+        form.addRow("Jira type", self.deployment)
+        self.user_label = QLabel()
+        form.addRow(self.user_label, self.username)
         self.secret_label = QLabel()
         form.addRow(self.secret_label, self.password)
         form.addRow("", self.use_token)
         form.addRow("", self.verify_ssl)
+        self.form = form
 
         title = QLabel("<h2>Connect to Jira</h2>")
         box = QVBoxLayout(self)
@@ -153,30 +171,54 @@ class LoginPage(QWidget):
         box.addWidget(title)
         box.addLayout(form)
         box.addWidget(self.connect_btn)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setOpenExternalLinks(True)
+        box.addWidget(self.hint)
         box.addWidget(self.status)
         box.addStretch()
-        self._toggle_token(self.use_token.isChecked())
+        self._update_labels()
 
-    def _toggle_token(self, on: bool):
-        self.secret_label.setText("Token" if on else "Password")
-        self.username.setEnabled(not on)
+    def _is_cloud(self) -> bool:
+        return self.deployment.currentData() == CLOUD
+
+    def _guess_deployment(self):
+        url = self.url.text().strip()
+        if url:
+            self.deployment.setCurrentIndex(self.deployment.findData(guess_deployment(url)))
+
+    def _update_labels(self, *_):
+        cloud = self._is_cloud()
+        token = self.use_token.isChecked() and not cloud
+        self.form.setRowVisible(self.use_token, not cloud)
+        self.user_label.setText("Email" if cloud else "Username")
+        self.username.setEnabled(not token)
+        self.secret_label.setText("API token" if cloud else ("Token" if token else "Password"))
+        self.hint.setText(
+            "Jira Cloud needs an API token instead of your password. Create one at "
+            "<a href='https://id.atlassian.com/manage-profile/security/api-tokens'>"
+            "id.atlassian.com → Security → API tokens</a>." if cloud else "")
 
     def _connect(self):
         url = self.url.text().strip()
         user = self.username.text().strip()
         secret = self.password.text()
-        token = self.use_token.isChecked()
+        cloud = self._is_cloud()
+        token = self.use_token.isChecked() and not cloud
         if not url or not secret or (not token and not user):
-            self.status.setText("Please fill in the URL, username and password (or token).")
+            what = "email and API token" if cloud else "username and password (or token)"
+            self.status.setText(f"Please fill in the URL, {what}.")
             return
         self.settings.setValue("url", url)
         self.settings.setValue("username", user)
-        self.settings.setValue("use_token", token)
+        self.settings.setValue("use_token", self.use_token.isChecked())
+        self.settings.setValue("deployment", self.deployment.currentData())
         self.settings.setValue("verify_ssl", self.verify_ssl.isChecked())
 
         self.connect_btn.setEnabled(False)
         self.status.setText("Connecting...")
-        creds = Credentials(url, user, secret, token, self.verify_ssl.isChecked())
+        creds = Credentials(url, user, secret, token, self.verify_ssl.isChecked(),
+                            CLOUD if cloud else DATA_CENTER)
         self._worker = LoginWorker(creds)
         self._worker.succeeded.connect(self._ok)
         self._worker.failed.connect(self._fail)
@@ -259,7 +301,9 @@ class ExportPage(QWidget):
     def set_session(self, client: JiraClient, user: dict):
         self.client = client
         name = user.get("displayName") or user.get("name", "")
-        self.user_label.setText(f"Connected to <b>{client.base_url}</b> as <b>{name}</b>")
+        kind = "Jira Cloud" if client.is_cloud else "Jira Data Center"
+        self.user_label.setText(
+            f"Connected to <b>{client.base_url}</b> ({kind}) as <b>{name}</b>")
         self.log.clear()
 
     def _pick_config(self):

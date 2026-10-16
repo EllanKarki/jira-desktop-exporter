@@ -23,6 +23,8 @@ def format_value(value: Any, schema_type: str | None = None) -> Any:
     if isinstance(value, list):
         return ", ".join(str(format_value(v)) for v in value if v is not None)
     if isinstance(value, dict):
+        if value.get("type") == "doc":  # Cloud v3 rich text (Atlassian Document Format)
+            return format_value(adf_to_text(value).strip())
         for k in ("displayName", "name", "value", "key", "emailAddress"):
             if value.get(k) not in (None, ""):
                 text = str(value[k])
@@ -39,6 +41,34 @@ def format_value(value: Any, schema_type: str | None = None) -> Any:
     if isinstance(value, str) and len(value) > MAX_CELL_LEN:
         return value[: MAX_CELL_LEN - 3] + "..."
     return value
+
+
+_ADF_BLOCKS = {"paragraph", "heading", "listItem", "blockquote", "codeBlock",
+               "tableRow", "panel", "rule"}
+
+
+def adf_to_text(node: Any) -> str:
+    """Flatten an Atlassian Document Format tree into plain text."""
+    if isinstance(node, list):
+        return "".join(adf_to_text(n) for n in node)
+    if not isinstance(node, dict):
+        return ""
+    kind = node.get("type")
+    if kind == "text":
+        return node.get("text", "")
+    if kind == "hardBreak":
+        return "\n"
+    attrs = node.get("attrs") or {}
+    if kind in ("mention", "emoji", "status", "date", "inlineCard"):
+        return str(attrs.get("text") or attrs.get("shortName") or attrs.get("url") or "")
+    text = adf_to_text(node.get("content", []))
+    if kind == "listItem":
+        text = "- " + text.strip()
+    elif kind == "tableCell" or kind == "tableHeader":
+        text = text.strip() + " | "
+    if kind in _ADF_BLOCKS:
+        text = text.rstrip("\n") + "\n"
+    return text
 
 
 def _parse_date(text: str, schema_type: str):
