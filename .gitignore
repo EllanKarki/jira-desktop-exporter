@@ -6,3 +6,4 @@ dist/
 *.spec
 *.xlsx
 .pytest_cache/
+!config/sprints.xlsx

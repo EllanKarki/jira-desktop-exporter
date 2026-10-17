@@ -141,6 +141,35 @@ class JiraClient:
             if data.get("isLast") is None and total is None and len(items) < 50:
                 return out
 
+    # Jira Software (agile) API: the same /rest/agile/1.0 paths on Cloud and Data Center.
+    AGILE = "/rest/agile/1.0"
+
+    def board(self, board_id: int) -> dict:
+        """Return a board; a clear error if it doesn't exist or isn't visible."""
+        try:
+            return self._request("GET", f"{self.AGILE}/board/{int(board_id)}")
+        except JiraError as exc:
+            if exc.status == 404:
+                raise JiraError(f"Board {board_id} was not found, or you don't have "
+                                "permission to see it.", 404) from exc
+            raise
+
+    def board_sprints(self, board_id: int) -> list[dict]:
+        """All sprints on a board (future, active and closed)."""
+        return self._paged_values(f"{self.AGILE}/board/{int(board_id)}/sprint", ("values",))
+
+    def create_sprint(self, name: str, board_id: int, start: str | None = None,
+                      end: str | None = None, goal: str | None = None) -> dict:
+        """Create a future sprint on a board. Dates are ISO 8601 strings with an offset."""
+        body: dict = {"name": name, "originBoardId": int(board_id)}
+        if start:
+            body["startDate"] = start
+        if end:
+            body["endDate"] = end
+        if goal:
+            body["goal"] = goal
+        return self._request("POST", f"{self.AGILE}/sprint", json=body)
+
     def create_issue_types(self, project_key: str,
                            cancelled: Callable[[], bool] | None = None) -> list[dict]:
         """Issue types a user can create in the project (each has 'id' and 'name')."""
