@@ -90,7 +90,7 @@ def test_load_teams_reports_bad_rows_and_keeps_good_ones(tmp_path):
         ROWS[0],
         ["", "ABC", 1, "", 1, date(2026, 1, 5), 14, None, ""],             # no team
         ["T2", "ABC", "x", "", 1, date(2026, 1, 5), 14, None, ""],         # bad board
-        ["T3", "ABC", 1, "", 1, "next monday", 14, None, ""],              # bad date
+        ["T3", "ABC", 1, "", 1, "01/05/2026", 14, None, ""],               # ambiguous date
         ["T4", "ABC", 1, "", 1, date(2026, 1, 5), 0, None, ""],            # zero length
         ["T5", "ABC", 1, "", 1, date(2026, 1, 5), 14, "noon", ""],         # bad time
         [None] * 9,                                                        # blank: ignored
@@ -233,7 +233,8 @@ def test_dialog_lists_teams_and_projects(dialog):
     assert dlg.start.dateTime().toPython() == datetime(2026, 2, 16, 9)
     assert dlg.end.dateTime().toPython() == datetime(2026, 3, 2, 9)
     dlg.project.setCurrentText("XYZ")
-    assert dlg.number.value() == 10 or dlg.name.text().startswith("XYZ-")
+    assert (dlg.number.value(), dlg.name.text()) == (10, "XYZ-10")
+    assert dlg.start.dateTime().toPython() == datetime(2026, 3, 2, 9)
     _pick(dlg, "Team Beta")
     assert dlg.number.value() == 1 and dlg.name.text() == "Beta 1"
     assert dlg.start.dateTime().toPython() == datetime(2026, 1, 12, 10, 30)
@@ -272,7 +273,7 @@ def test_dialog_rejects_kanban_and_unknown_boards(dialog, jira_server):
     qapp, dlg, asked, _ = dialog
     _pick(dlg, "Team Kanban")
     _create(qapp, dlg)
-    assert "is a kanban board" in dlg.status.text()
+    assert "is a Kanban board" in dlg.status.text()
     _pick(dlg, "Team Lost")
     _create(qapp, dlg)
     assert "Board 99 was not found" in dlg.status.text()
@@ -328,8 +329,55 @@ def test_dialog_close_while_checking(jira_server, dialog):
     assert dlg._worker is None
     from jira_exporter import sprint_dialog
     from test_ui import wait_until
-    wait_until(qapp, lambda: not sprint_dialog._BACKGROUND)
+    wait_until(qapp, lambda: all(not t.is_alive() for t, _ in sprint_dialog._WORKERS))
+    for _ in range(20):
+        qapp.processEvents()
     assert "Checking" in dlg.status.text()  # the result arrived after closing: ignored
+
+
+def test_dialog_remembers_next_number_per_team_and_project(dialog, jira_server):
+    qapp, dlg, _, _ = dialog
+    dlg.number.setValue(4)
+    _create(qapp, dlg)
+    assert dlg.number.value() == 5
+    _pick(dlg, "Team Beta")
+    dlg.number.setValue(50)
+    _pick(dlg, "Team Alpha", "XYZ")
+    assert dlg.number.value() == 10  # XYZ's own first number, not Beta's 50
+    dlg.project.setCurrentText("ABC")
+    assert (dlg.number.value(), dlg.name.text()) == (5, "Team Alpha Sprint 5")
+    _pick(dlg, "Team Beta")
+    assert dlg.number.value() == 1
+
+
+def test_dialog_reopens_on_last_team_and_project(dialog, jira_server):
+    from jira_exporter.sprint_dialog import SprintDialog
+    qapp, dlg, _, _ = dialog
+    _pick(dlg, "Team Alpha", "XYZ")
+    dlg.number.setValue(11)
+    _create(qapp, dlg)
+    again = SprintDialog(dlg.client, dlg.settings, None)
+    assert (again.team.currentText(), again.project.currentText()) == ("Team Alpha", "XYZ")
+    assert again.number.value() == 12
+    again.reject()
+
+
+def test_dialog_bad_name_format_clears_the_form(dialog, tmp_path):
+    qapp, dlg, _, _ = dialog
+    rows = [ROWS[0], ["Team Bad", "ABC", 1, "{team[x]}", 1, date(2026, 1, 5), 14, None, ""]]
+    dlg.config_path.setText(str(write_rows(tmp_path / "bad.xlsx", rows)))
+    dlg.load_config()
+    assert dlg.name.text() == "Team Alpha Sprint 1"
+    _pick(dlg, "Team Bad")
+    assert "placeholders" in dlg.status.text()
+    assert dlg.name.text() == "" and not dlg.create_btn.isEnabled()
+    _pick(dlg, "Team Alpha")
+    assert dlg.create_btn.isEnabled()
+
+
+def test_plan_sprint_far_out_numbers():
+    with pytest.raises(SprintConfigError, match="outside the dates"):
+        plan_sprint(_cfg(length_days=10**6), 99999)
 
 
 # --------------------------------------------------------------------- menu ---

@@ -66,7 +66,7 @@ One row per team and project on the **Teams** sheet. A team can have several row
 | Board ID | yes | 12 | The Scrum board the sprint is created on. Open the board in Jira; the number after `rapidView=` (Data Center) or `/boards/` (Cloud) in the address is its ID. |
 | Sprint Name Format | no | `{team} Sprint {number}` | Placeholders: `{team}`, `{project}`, `{number}`. This is also the default. |
 | First Sprint Number | yes | 1 | The number of a sprint whose start date you know. |
-| First Sprint Start Date | yes | 2026-01-05 | That sprint's start date. |
+| First Sprint Start Date | yes | 2026-01-05 | That sprint's start date: an Excel date, or text written year-month-day. Text like 01/05/2026 is refused because it means different days in different countries. |
 | Sprint Length (days) | yes | 14 | Sprints follow on back to back: sprint N starts (N − first number) × length days after the first one, and ends when the next one starts. |
 | Start Time | no | 09:00 | Start and end time of day, in your computer's time zone. Default 09:00. |
 | Sprint Goal | no | `Sprint {number} goal` | Same placeholders as the name. |
@@ -77,11 +77,11 @@ Rows with problems (an empty required cell, a date that isn't a date, and so on)
 
 The form opens with the config next to the app (or the last one you picked). Choose the **Team**, **Project** and **Sprint number**. The name, start, end and goal are filled in from the config, and you can change them before creating. **Create Sprint** then:
 
-1. checks the board exists and is a Scrum board, and that it has no sprint with the same name (any state);
+1. checks the board exists and isn't a Kanban board, and that it has no sprint with the same name (any state);
 2. asks you to confirm, noting if the board belongs to a different project;
 3. creates the sprint in the **future** state. It is not started; start it from the board in Jira as usual.
 
-After creating, the form moves on to the next sprint number.
+After creating, the form moves on to the next sprint number, and remembers it for that team and project. Other teams and projects start at the config's First Sprint Number until you create one there.
 
 Sprint names are limited to 30 characters, the limit Atlassian documents in JSWCLOUD-17483 and JSWSERVER-16256. You need permission to manage sprints on the board's projects (**Manage Sprints**; Jira Cloud may also require **Schedule Issues**). Without it, Jira refuses and the form shows its error.
 

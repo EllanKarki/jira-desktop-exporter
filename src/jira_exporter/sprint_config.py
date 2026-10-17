@@ -61,9 +61,13 @@ def plan_sprint(cfg: TeamConfig, number: int) -> SprintPlan:
     and ends when the next one starts."""
     if number < 1:
         raise SprintConfigError("The sprint number must be 1 or more.")
-    start = datetime.combine(cfg.first_start, cfg.start_time) + \
-        timedelta(days=(number - cfg.first_number) * cfg.length_days)
-    end = start + timedelta(days=cfg.length_days)
+    try:
+        start = datetime.combine(cfg.first_start, cfg.start_time) + \
+            timedelta(days=(number - cfg.first_number) * cfg.length_days)
+        end = start + timedelta(days=cfg.length_days)
+    except OverflowError as exc:
+        raise SprintConfigError(f"Sprint {number} would start outside the dates a computer "
+                                "can handle; check the number and the config.") from exc
     values = {"team": cfg.team, "project": cfg.project_key, "number": number}
     return SprintPlan(_fill(cfg.name_format, values, cfg.row, NAME_FORMAT).strip(),
                       cfg.board_id, start, end,
@@ -80,7 +84,7 @@ def jira_datetime(dt: datetime) -> str:
 def _fill(template: str, values: dict, row: int, column: str) -> str:
     try:
         return template.format(**values)
-    except (KeyError, IndexError, ValueError) as exc:
+    except Exception as exc:  # KeyError, IndexError, ValueError, AttributeError...
         raise SprintConfigError(
             f"Row {row}, '{column}': can't use '{template}' ({exc}). Use only "
             "{team}, {project} and {number} as placeholders.") from exc
@@ -168,7 +172,7 @@ def _int(value, n, column, minimum) -> int:
         if number != int(number):
             raise ValueError
         number = int(number)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise SprintConfigError(f"Row {n}: '{column}' must be a whole number, not '{value}'.")
     if number < minimum:
         raise SprintConfigError(f"Row {n}: '{column}' must be {minimum} or more.")
@@ -180,14 +184,13 @@ def _date(value, n) -> date:
         return value.date()
     if isinstance(value, date):
         return value
-    text = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            pass
-    raise SprintConfigError(f"Row {n}: '{FIRST_START}' must be a date (for example "
-                            f"2026-01-05), not '{value}'.")
+    # Text is accepted only as yyyy-mm-dd: 01/05/2026 means different days in
+    # different countries.
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise SprintConfigError(f"Row {n}: '{FIRST_START}' must be a date cell or text like "
+                                f"2026-01-05 (year-month-day), not '{value}'.") from None
 
 
 def _time(value, n) -> time:
@@ -222,8 +225,9 @@ NOTES = [
     ("Sprint Name Format", "Optional. Placeholders: {team}, {project}, {number}. "
                            f"Default: {DEFAULT_NAME_FORMAT}"),
     ("First Sprint Number", "The number of a sprint whose start date you know."),
-    ("First Sprint Start Date", "That sprint's start date. Later sprints follow on back to "
-                                "back, one sprint length apart."),
+    ("First Sprint Start Date", "That sprint's start date, as an Excel date or text like "
+                                "2026-01-05. Later sprints follow on back to back, one "
+                                "sprint length apart."),
     ("Sprint Length (days)", "e.g. 14 for two-week sprints. A sprint ends when the next starts."),
     ("Start Time", "Optional, e.g. 09:00 (your computer's time zone). Default 09:00."),
     ("Sprint Goal", "Optional. Same placeholders as the name."),
