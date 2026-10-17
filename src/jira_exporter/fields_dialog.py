@@ -135,6 +135,9 @@ class FieldsDialog(QDialog):
 
         self.select_used_btn = QPushButton("Tick used fields")
         self.select_used_btn.clicked.connect(lambda: self._tick(lambda f: f.suggested))
+        self.tick_all_btn = QPushButton("Tick all")
+        self.tick_all_btn.setToolTip("Tick every field listed (all of them when the filter is empty)")
+        self.tick_all_btn.clicked.connect(self._tick_all_shown)
         self.clear_btn = QPushButton("Untick all")
         self.clear_btn.clicked.connect(lambda: self._tick(lambda f: False))
         self.save_btn = QPushButton("Save as fields.json...")
@@ -143,6 +146,7 @@ class FieldsDialog(QDialog):
         self.xlsx_btn.clicked.connect(self._save_xlsx)
         bottom = QHBoxLayout()
         bottom.addWidget(self.select_used_btn)
+        bottom.addWidget(self.tick_all_btn)
         bottom.addWidget(self.clear_btn)
         bottom.addStretch()
         bottom.addWidget(self.xlsx_btn)
@@ -168,7 +172,8 @@ class FieldsDialog(QDialog):
         self.status.setText(text)
 
     def _set_result_buttons(self, on: bool):
-        for b in (self.select_used_btn, self.clear_btn, self.save_btn, self.xlsx_btn):
+        for b in (self.select_used_btn, self.tick_all_btn, self.clear_btn, self.save_btn,
+                  self.xlsx_btn):
             b.setEnabled(on)
 
     def _scan(self):
@@ -283,6 +288,13 @@ class FieldsDialog(QDialog):
     def _tick(self, rule):
         if self.result:
             self._checked = {f.id for f in self.result.fields if rule(f)}
+            self._fill_table()
+
+    def _tick_all_shown(self):
+        """Tick every row currently listed; rows hidden by the filter keep their state."""
+        if self.result:
+            self._checked |= {f.id for row, f in enumerate(self._rows)
+                              if not self.table.isRowHidden(row)}
             self._fill_table()
 
     def selected_fields(self) -> list[FieldUsage]:

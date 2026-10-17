@@ -41,7 +41,9 @@ def test_login_then_export(jira_server, tmp_path, monkeypatch):
 
     lp.password.setText("secret")
     lp.connect_btn.click()
-    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    wait_until(qapp, lambda: win.export.client is not None)
+    assert win.stack.currentWidget() is win.start
+    win.jql_action.trigger()
     assert lp.password.text() == ""
 
     ep = win.export
@@ -79,7 +81,9 @@ def test_cloud_login_then_export(cloud_server, tmp_path, monkeypatch):
     lp.username.setText("alice")
     lp.password.setText("secret")
     lp.connect_btn.click()
-    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    wait_until(qapp, lambda: win.export.client is not None)
+    assert win.stack.currentWidget() is win.start
+    win.jql_action.trigger()
     assert "Jira Cloud" in win.export.user_label.text()
 
     ep = win.export
@@ -267,7 +271,9 @@ def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
     lp.username.setText("alice")
     lp.password.setText("secret")
     lp.connect_btn.click()
-    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    wait_until(qapp, lambda: win.export.client is not None)
+    assert win.stack.currentWidget() is win.start
+    win.jql_action.trigger()
     assert not win.login_action.isEnabled()
     for a in (win.logout_action, win.discover_action, win.jql_action):
         assert a.isEnabled()
@@ -312,3 +318,24 @@ def test_login_form_only_opens_from_the_menu(tmp_path):
     assert win.stack.currentWidget() is win.login and win.login.isVisible()
     assert win.login.password.hasFocus() or not win.isActiveWindow()
     win.close()
+
+
+def test_export_form_only_opens_from_the_menu(jira_server, tmp_path):
+    _fresh_settings(tmp_path)
+    qapp = QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    assert not hasattr(win.export, "discover_btn")
+    win.login_action.trigger()
+    lp = win.login
+    lp.url.setText(f"http://127.0.0.1:{jira_server.server_address[1]}")
+    lp.username.setText("alice")
+    lp.password.setText("secret")
+    lp.connect_btn.click()
+    wait_until(qapp, lambda: win.export.client is not None)
+    assert win.stack.currentWidget() is win.start
+    assert "Connected to" in win.start.hint.text() and "Alice A" in win.start.hint.text()
+    win.jql_action.trigger()
+    assert win.stack.currentWidget() is win.export
+    win.logout_action.trigger()
+    assert win.stack.currentWidget() is win.start
+    assert "not connected" in win.start.hint.text()

@@ -291,14 +291,10 @@ class ExportPage(QWidget):
         self.config_path = QLineEdit(settings.value("config_path", str(default_config_path())))
         browse_cfg = QPushButton("Browse...")
         browse_cfg.clicked.connect(self._pick_config)
-        self.discover_btn = QPushButton("Discover fields...")
-        self.discover_btn.setToolTip("List the fields a project uses and save a fields.json from them")
-        self.discover_btn.clicked.connect(self._discover_fields)
         self.fields_dialog: FieldsDialog | None = None
         cfg_row = QHBoxLayout()
         cfg_row.addWidget(self.config_path, 1)
         cfg_row.addWidget(browse_cfg)
-        cfg_row.addWidget(self.discover_btn)
 
         default_out = Path(settings.value("out_dir", str(Path.home()))) / "jira_export.xlsx"
         self.out_path = QLineEdit(str(default_out))
@@ -453,20 +449,29 @@ class ExportPage(QWidget):
 
 
 class StartPage(QWidget):
-    """Shown while not connected; the login form opens from Jira > Login."""
+    """The home screen: forms open only from the menus."""
 
     def __init__(self):
         super().__init__()
         title = QLabel("<h2>Jira Desktop Exporter</h2>")
-        hint = QLabel("You are not connected to Jira.<br>"
-                      "Choose <b>Jira &gt; Login</b> to connect.")
-        hint.setWordWrap(True)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
         box = QVBoxLayout(self)
         box.addStretch()
-        for w in (title, hint):
+        for w in (title, self.hint):
             w.setAlignment(Qt.AlignCenter)
             box.addWidget(w)
         box.addStretch()
+        self.set_connected(None)
+
+    def set_connected(self, description: str | None):
+        if description is None:
+            self.hint.setText("You are not connected to Jira.<br>"
+                              "Choose <b>Jira &gt; Login</b> to connect.")
+        else:
+            self.hint.setText(f"{html.escape(description)}<br><br>"
+                              "Choose <b>Extract &gt; JQL Extract</b> to export issues, or "
+                              "<b>Configuration &gt; Discover fields</b> to pick the fields.")
 
 
 class MainWindow(QMainWindow):
@@ -545,16 +550,19 @@ class MainWindow(QMainWindow):
 
     def _discover_fields(self):
         if self._logged_in():
-            self.stack.setCurrentWidget(self.export)
             self.export._discover_fields()
 
     def _on_login(self, client, user):
         self.export.set_session(client, user)
-        self.stack.setCurrentWidget(self.export)
+        name = user.get("displayName") or user.get("name", "")
+        kind = "Jira Cloud" if client.is_cloud else "Jira Data Center"
+        self.start.set_connected(f"Connected to {client.base_url} ({kind}) as {name}.")
+        self.stack.setCurrentWidget(self.start)
         self._update_menus()
 
     def _on_logout(self):
         self.export.client = None
+        self.start.set_connected(None)
         self.stack.setCurrentWidget(self.start)
         self._update_menus()
 
