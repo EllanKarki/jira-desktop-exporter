@@ -452,6 +452,23 @@ class ExportPage(QWidget):
         QMessageBox.critical(self, "Export failed", msg)
 
 
+class StartPage(QWidget):
+    """Shown while not connected; the login form opens from Jira > Login."""
+
+    def __init__(self):
+        super().__init__()
+        title = QLabel("<h2>Jira Desktop Exporter</h2>")
+        hint = QLabel("You are not connected to Jira.<br>"
+                      "Choose <b>Jira &gt; Login</b> to connect.")
+        hint.setWordWrap(True)
+        box = QVBoxLayout(self)
+        box.addStretch()
+        for w in (title, hint):
+            w.setAlignment(Qt.AlignCenter)
+            box.addWidget(w)
+        box.addStretch()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -459,8 +476,10 @@ class MainWindow(QMainWindow):
         self.resize(720, 520)
         settings = QSettings("JiraDesktopExporter", "JiraDesktopExporter")
         self.stack = QStackedWidget()
+        self.start = StartPage()
         self.login = LoginPage(settings)
         self.export = ExportPage(settings)
+        self.stack.addWidget(self.start)
         self.stack.addWidget(self.login)
         self.stack.addWidget(self.export)
         self.setCentralWidget(self.stack)
@@ -514,7 +533,10 @@ class MainWindow(QMainWindow):
     def _show_login(self):
         if not self._logged_in():
             self.stack.setCurrentWidget(self.login)
-            self.login.password.setFocus()
+            lp = self.login
+            first_empty = next((w for w in (lp.url, lp.username) if w.isEnabled() and not w.text().strip()),
+                               lp.password)
+            first_empty.setFocus()
 
     def _show_extract(self):
         if self._logged_in():
@@ -533,7 +555,7 @@ class MainWindow(QMainWindow):
 
     def _on_logout(self):
         self.export.client = None
-        self.stack.setCurrentWidget(self.login)
+        self.stack.setCurrentWidget(self.start)
         self._update_menus()
 
 

@@ -31,6 +31,7 @@ def test_login_then_export(jira_server, tmp_path, monkeypatch):
     qapp = QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
 
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText(f"http://127.0.0.1:{jira_server.server_address[1]}")
     lp.username.setText("alice")
@@ -65,6 +66,7 @@ def test_cloud_login_then_export(cloud_server, tmp_path, monkeypatch):
     qapp = QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
 
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText("https://acme.atlassian.net")
     lp._guess_deployment()
@@ -103,6 +105,7 @@ def test_type_guessed_from_settings_saved_before_cloud_support(tmp_path):
     s.sync()
     QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
+    win.login_action.trigger()
     lp = win.login
     assert lp.deployment.currentData() == "cloud"
     assert lp.secret_label.text() == "API token"
@@ -115,6 +118,7 @@ def test_saved_type_wins_over_url_guess(tmp_path):
     s.sync()
     QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
+    win.login_action.trigger()
     lp = win.login
     assert lp.deployment.currentData() == "cloud"
     lp.url.setText("https://jira2.acme.com")  # editing the URL keeps the manual choice
@@ -126,6 +130,7 @@ def test_url_guess_switches_back_only_when_it_chose_cloud(tmp_path):
     _fresh_settings(tmp_path)
     QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText("https://acme.atlassian.net")
     lp._guess_deployment()
@@ -168,6 +173,7 @@ def test_url_round_trip_keeps_manual_cloud_choice(tmp_path):
     _fresh_settings(tmp_path)
     QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText("https://jira.acme.com")
     lp._guess_deployment()
@@ -255,6 +261,7 @@ def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
     for a in (win.logout_action, win.discover_action, win.jql_action):
         assert not a.isEnabled()
 
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText(f"http://127.0.0.1:{jira_server.server_address[1]}")
     lp.username.setText("alice")
@@ -280,7 +287,7 @@ def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
     assert win.stack.currentWidget() is win.export
     win.logout_action.setEnabled(True)
     win.logout_action.trigger()
-    assert win.stack.currentWidget() is win.login and win.export.client is None
+    assert win.stack.currentWidget() is win.start and win.export.client is None
     assert win.login_action.isEnabled() and not win.jql_action.isEnabled()
     win.login_action.trigger()
     assert win.stack.currentWidget() is win.login
@@ -288,3 +295,20 @@ def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
     win.show()
     win.exit_action.trigger()
     assert not win.isVisible()
+
+
+def test_login_form_only_opens_from_the_menu(tmp_path):
+    s = _fresh_settings(tmp_path)
+    s.setValue("url", "https://jira.acme.com")
+    s.setValue("username", "alice")
+    s.sync()
+    QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    win.show()
+    assert win.stack.currentWidget() is win.start
+    assert not win.login.isVisible()
+    assert "Jira &gt; Login" in win.start.findChildren(appmod.QLabel)[1].text()
+    win.login_action.trigger()
+    assert win.stack.currentWidget() is win.login and win.login.isVisible()
+    assert win.login.password.hasFocus() or not win.isActiveWindow()
+    win.close()

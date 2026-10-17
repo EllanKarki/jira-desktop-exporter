@@ -190,6 +190,7 @@ def test_dialog_scan_and_save(jira_server, tmp_path, monkeypatch):
     qapp = QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
 
+    win.login_action.trigger()
     lp = win.login
     lp.url.setText(f"http://127.0.0.1:{jira_server.server_address[1]}")
     lp.username.setText("alice")
