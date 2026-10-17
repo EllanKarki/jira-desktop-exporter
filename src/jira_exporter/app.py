@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -465,14 +466,75 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
         self.login.logged_in.connect(self._on_login)
         self.export.logout.connect(self._on_logout)
+        self._build_menus()
+        self._update_menus()
+
+    def _build_menus(self):
+        bar = self.menuBar()
+
+        jira = bar.addMenu("&Jira")
+        self.login_action = QAction("&Login", self)
+        self.login_action.triggered.connect(self._show_login)
+        self.logout_action = QAction("Log&out", self)
+        self.logout_action.triggered.connect(self._on_logout)
+        # "Exit" also becomes Quit in the application menu on macOS.
+        self.exit_action = QAction("E&xit", self)
+        self.exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        self.exit_action.triggered.connect(self.close)
+        jira.addAction(self.login_action)
+        jira.addAction(self.logout_action)
+        jira.addSeparator()
+        jira.addAction(self.exit_action)
+
+        config = bar.addMenu("&Configuration")
+        self.discover_action = QAction("&Discover fields...", self)
+        self.discover_action.triggered.connect(self._discover_fields)
+        config.addAction(self.discover_action)
+
+        extract = bar.addMenu("E&xtract")
+        self.jql_action = QAction("&JQL Extract", self)
+        self.jql_action.triggered.connect(self._show_extract)
+        extract.addAction(self.jql_action)
+
+        # Re-check what is allowed each time a menu opens (e.g. an export may be running).
+        for menu in (jira, config, extract):
+            menu.aboutToShow.connect(self._update_menus)
+
+    def _logged_in(self) -> bool:
+        return self.export.client is not None
+
+    def _update_menus(self):
+        logged_in = self._logged_in()
+        exporting = logged_in and not self.export.export_btn.isEnabled()
+        self.login_action.setEnabled(not logged_in)
+        self.logout_action.setEnabled(logged_in and not exporting)
+        self.discover_action.setEnabled(logged_in)
+        self.jql_action.setEnabled(logged_in)
+
+    def _show_login(self):
+        if not self._logged_in():
+            self.stack.setCurrentWidget(self.login)
+            self.login.password.setFocus()
+
+    def _show_extract(self):
+        if self._logged_in():
+            self.stack.setCurrentWidget(self.export)
+            self.export.jql.setFocus()
+
+    def _discover_fields(self):
+        if self._logged_in():
+            self.stack.setCurrentWidget(self.export)
+            self.export._discover_fields()
 
     def _on_login(self, client, user):
         self.export.set_session(client, user)
         self.stack.setCurrentWidget(self.export)
+        self._update_menus()
 
     def _on_logout(self):
         self.export.client = None
         self.stack.setCurrentWidget(self.login)
+        self._update_menus()
 
 
 def main():
