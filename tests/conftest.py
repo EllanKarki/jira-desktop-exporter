@@ -127,6 +127,9 @@ class FakeJira(BaseHTTPRequestHandler):
         if not self._authed():
             return self._send(401, {})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.server.search_delay:
+            import time
+            time.sleep(self.server.search_delay)
         if body["jql"] == "bad":
             return self._send(400, {"errorMessages": ["Error in the JQL Query"]})
         self.server.requests.append((self.path, body))
@@ -160,6 +163,7 @@ def _serve(cloud):
     srv.requests = []
     srv.cloud = cloud
     srv.createmeta_status = None  # set to e.g. 404 to mimic Jira before 8.4
+    srv.search_delay = 0  # seconds, to mimic a slow Jira
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

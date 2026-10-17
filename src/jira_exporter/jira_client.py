@@ -124,10 +124,13 @@ class JiraClient:
                                 "permission to see it.", 404) from exc
             raise
 
-    def _paged_values(self, path: str, keys: tuple[str, ...]) -> list[dict]:
+    def _paged_values(self, path: str, keys: tuple[str, ...],
+                      cancelled: Callable[[], bool] | None = None) -> list[dict]:
         """Collect every page of a startAt/maxResults list endpoint."""
         out, start = [], 0
         while True:
+            if cancelled and cancelled():
+                return out
             data = self._request("GET", path, params={"startAt": start, "maxResults": 50})
             items = next((data[k] for k in keys if isinstance(data.get(k), list)), [])
             out.extend(items)
@@ -138,18 +141,20 @@ class JiraClient:
             if data.get("isLast") is None and total is None and len(items) < 50:
                 return out
 
-    def create_issue_types(self, project_key: str) -> list[dict]:
+    def create_issue_types(self, project_key: str,
+                           cancelled: Callable[[], bool] | None = None) -> list[dict]:
         """Issue types a user can create in the project (each has 'id' and 'name')."""
         return self._paged_values(
             f"{self.api}/issue/createmeta/{quote(project_key, safe='')}/issuetypes",
-            ("issueTypes", "values"))
+            ("issueTypes", "values"), cancelled)
 
-    def create_fields(self, project_key: str, issue_type_id: str) -> list[dict]:
+    def create_fields(self, project_key: str, issue_type_id: str,
+                      cancelled: Callable[[], bool] | None = None) -> list[dict]:
         """Fields on the create screen for one issue type ('fieldId', 'name', 'schema')."""
         return self._paged_values(
             f"{self.api}/issue/createmeta/{quote(project_key, safe='')}/issuetypes/"
             f"{quote(issue_type_id, safe='')}",
-            ("fields", "values"))
+            ("fields", "values"), cancelled)
 
     def search(
         self,

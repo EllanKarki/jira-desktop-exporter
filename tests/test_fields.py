@@ -38,6 +38,11 @@ def client(srv, deployment="datacenter"):
     ({"self": "x", "watchCount": 0, "isWatching": False}, False),
     ({"self": "x", "watchCount": 2, "isWatching": False}, True),
     ({"self": "x", "votes": 0, "hasVoted": False}, False),
+    ("{}", False),  # Cloud's Development field when empty
+    ({"issuerestrictions": {}, "shouldDisplay": False}, False),
+    ({"showField": False}, False),
+    ({"self": "x", "value": "High", "id": "1"}, True),
+    ({"outer": {"inner": None}}, False),
 ])
 def test_has_value(value, expected):
     assert has_value(value) is expected
@@ -94,7 +99,7 @@ def test_discover_when_createmeta_is_missing(jira_server):
     jira_server.createmeta_status = 404  # Data Center before 8.4
     result = discover_fields(client(jira_server), "ABC", sample_size=50)
     assert result.sampled == 50
-    assert "8.4" in result.warnings[0]
+    assert "Data Center 8.4" in result.warnings[0]
     assert not any(f.issue_types for f in result.fields)
     assert _by_id(result)["summary"].used_in == 50
 
@@ -276,3 +281,127 @@ def test_dialog_close_cancels_scan(jira_server, tmp_path):
     dlg.reject()  # must stop the worker thread without hanging or crashing
     assert dlg._thread is None and dlg.result is None
     assert settings.value("discover_project") == "ABC"
+
+
+def test_suggested_fields_skip_raw_data_and_placeholders(jira_server, monkeypatch):
+    c = client(jira_server)
+    real = c.search
+
+    def search(*a, **k):
+        for issue in real(*a, **k):
+            yield dict(issue, fields=dict(issue["fields"], workratio=-1,
+                                          comment={"comments": [{"body": "x"}], "total": 1}))
+    monkeypatch.setattr(c, "search", search)
+    f = _by_id(discover_fields(c, "ABC", sample_size=10))
+    assert "workratio" not in f or f["workratio"].used_in == 0
+    assert f["comment"].used_in == 10 and not f["comment"].suggested
+    assert f["summary"].suggested and f["issuekey"].suggested
+
+
+def test_no_sample_and_no_createmeta_says_why(jira_server):
+    jira_server.createmeta_status = 403
+    result = discover_fields(client(jira_server), "ABC", sample_size=0)
+    assert [x.id for x in result.relevant] == ["issuekey"]
+    assert any("No issues were checked" in w for w in result.warnings)
+
+
+def test_write_config_with_unreadable_template(tmp_path):
+    template = tmp_path / "ansi.json"
+    template.write_bytes('{"fields": [{"name": "R\xe9sum\xe9"}]}'.encode("cp1252"))
+    out = tmp_path / "out.json"
+    write_config(out, [FieldUsage("summary", "Summary")], template=template)
+    assert load_config(out).fields[0].id == "summary"
+
+
+def _dialog(srv, tmp_path):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from jira_exporter.fields_dialog import FieldsDialog
+
+    for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
+        QSettings.setPath(fmt, QSettings.UserScope, str(tmp_path))
+    qapp = QApplication.instance() or QApplication([])
+    dlg = FieldsDialog(client(srv), QSettings("JiraDesktopExporter", "JiraDesktopExporter"), "")
+    dlg.show()
+    return qapp, dlg
+
+
+def _scan(qapp, dlg, key="ABC"):
+    from test_ui import wait_until
+    dlg.project.setText(key)
+    before = dlg.result
+    dlg.scan_btn.click()
+    wait_until(qapp, lambda: dlg._worker is None)
+    return dlg.result is not before
+
+
+def test_enter_in_filter_does_not_rescan(jira_server, tmp_path):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    assert _scan(qapp, dlg)
+    searches = len(jira_server.requests)
+    dlg._tick(lambda f: f.id == "customfield_10003")
+    QTest.keyClick(dlg.filter, Qt.Key_Return)
+    QTest.keyClick(dlg.table, Qt.Key_Return)
+    for _ in range(20):
+        qapp.processEvents()
+    assert len(jira_server.requests) == searches and dlg._worker is None
+    assert [f.id for f in dlg.selected_fields()] == ["customfield_10003"]
+    dlg.reject()
+
+
+def test_hidden_ticks_are_kept_and_saved(jira_server, tmp_path):
+    from PySide6.QtCore import Qt
+
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    _scan(qapp, dlg)
+    dlg.show_all.setChecked(True)
+    row = [f.id for f in dlg._rows].index("customfield_10099")
+    dlg.table.item(row, 0).setCheckState(Qt.Checked)
+    dlg.show_all.setChecked(False)
+    assert "customfield_10099" in {f.id for f in dlg.selected_fields()}
+    dlg.show_all.setChecked(True)
+    row = [f.id for f in dlg._rows].index("customfield_10099")
+    assert dlg.table.item(row, 0).checkState() == Qt.Checked
+    dlg.reject()
+
+
+def test_failed_rescan_keeps_previous_result_usable(jira_server, tmp_path):
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    _scan(qapp, dlg)
+    _scan(qapp, dlg, "ABD")
+    assert "was not found" in dlg.status.text() and "previous scan of ABC" in dlg.status.text()
+    assert dlg.save_btn.isEnabled() and dlg.result.project_key == "ABC"
+    dlg.reject()
+
+
+def test_status_shows_special_characters_as_typed(jira_server, tmp_path, monkeypatch):
+    import conftest
+    monkeypatch.setitem(conftest.PROJECT, "name", "R&D <Platform>")
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    _scan(qapp, dlg)
+    assert dlg.status.text().startswith("R&D <Platform> (ABC)")
+    dlg.reject()
+
+
+def test_closing_during_a_slow_scan_does_not_freeze(jira_server, tmp_path):
+    import time
+    from test_ui import wait_until
+
+    jira_server.search_delay = 1.5
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    dlg.project.setText("ABC")
+    dlg.scan_btn.click()
+    wait_until(qapp, lambda: "Checking which fields" in dlg.status.text())
+    start = time.monotonic()
+    dlg.reject()
+    assert time.monotonic() - start < 0.5
+    assert dlg.result is None
+    from jira_exporter import fields_dialog
+    wait_until(qapp, lambda: not fields_dialog._RUNNING, timeout=10)
+    for _ in range(20):
+        qapp.processEvents()
+    assert dlg.result is None  # the late result was ignored

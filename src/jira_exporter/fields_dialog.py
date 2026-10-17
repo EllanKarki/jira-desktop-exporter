@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import html
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -31,6 +31,18 @@ from jira_exporter.field_discovery import (
     write_field_list_xlsx,
 )
 from jira_exporter.jira_client import JiraClient, JiraError
+
+# Scans still running after their dialog closed. They finish in the background (a
+# request in flight can't be interrupted) instead of freezing the window while we wait.
+_RUNNING: set[tuple[QThread, QObject]] = set()
+
+
+def _wait_for_scans():
+    for thread, worker in list(_RUNNING):
+        worker.cancel()
+        thread.quit()
+        thread.wait(5000)
+
 
 COLUMNS = ["Include", "Field name", "Field id", "Type", "Issues with a value", "On create screen for"]
 
@@ -76,6 +88,7 @@ class FieldsDialog(QDialog):
         self._rows: list[FieldUsage] = []
         self._thread: QThread | None = None
         self._worker: DiscoverWorker | None = None
+        self._checked: set[str] = set()  # ticked field ids, shown or not
 
         self.project = QLineEdit(settings.value("discover_project", ""))
         self.project.setPlaceholderText("Project key, e.g. ABC")
@@ -113,11 +126,15 @@ class FieldsDialog(QDialog):
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
 
-        self.status = QLabel("Enter a project key and click Scan.")
+        self.table.itemChanged.connect(self._item_changed)
+
+        self.status = QLabel()
+        self.status.setTextFormat(Qt.PlainText)
         self.status.setWordWrap(True)
+        self._say("Enter a project key and click Scan.")
 
         self.select_used_btn = QPushButton("Tick used fields")
-        self.select_used_btn.clicked.connect(lambda: self._tick(lambda f: f.is_key or f.used_in > 0))
+        self.select_used_btn.clicked.connect(lambda: self._tick(lambda f: f.suggested))
         self.clear_btn = QPushButton("Untick all")
         self.clear_btn.clicked.connect(lambda: self._tick(lambda f: False))
         self.save_btn = QPushButton("Save as fields.json...")
@@ -138,8 +155,17 @@ class FieldsDialog(QDialog):
         box.addWidget(self.table, 1)
         box.addWidget(self.status)
         box.addLayout(bottom)
+        # Enter in the filter or the table must not "click" a button (e.g. rescan and
+        # reset the ticks); Enter in the project box still scans.
+        for b in self.findChildren(QPushButton):
+            b.setAutoDefault(False)
+            b.setDefault(False)
 
     # ------------------------------------------------------------- scanning ---
+
+    def _say(self, text: str, error: bool = False):
+        self.status.setStyleSheet("color: #c0392b;" if error else "")
+        self.status.setText(text)
 
     def _set_result_buttons(self, on: bool):
         for b in (self.select_used_btn, self.clear_btn, self.save_btn, self.xlsx_btn):
@@ -148,7 +174,7 @@ class FieldsDialog(QDialog):
     def _scan(self):
         key = self.project.text().strip()
         if not key:
-            self.status.setText("Enter a project key first.")
+            self._say("Enter a project key first.")
             return
         if self._thread is not None:
             return
@@ -156,30 +182,51 @@ class FieldsDialog(QDialog):
         self.settings.setValue("discover_sample", self.sample.value())
         self.scan_btn.setEnabled(False)
         self._set_result_buttons(False)
-        self.status.setText(f"Scanning {key}...")
-        self._worker = DiscoverWorker(self.client, key, self.sample.value())
-        self._worker.progress.connect(self.status.setText)
-        self._worker.finished.connect(self._on_result)
-        self._worker.failed.connect(self._on_failed)
-        self._thread = QThread(self)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.start()
+        self._say(f"Scanning {key}...")
+        worker = DiscoverWorker(self.client, key, self.sample.value())
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        entry = (thread, worker)
+        _RUNNING.add(entry)
+        thread.finished.connect(lambda: _RUNNING.discard(entry))
+        worker.progress.connect(self._on_progress)
+        worker.finished.connect(self._on_result)
+        worker.failed.connect(self._on_failed)
+        app = QApplication.instance()
+        if app is not None and not getattr(app, "_scan_cleanup_hooked", False):
+            app.aboutToQuit.connect(_wait_for_scans)
+            app._scan_cleanup_hooked = True
+        self._thread, self._worker = thread, worker
+        thread.start()
 
-    def _stop_thread(self):
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait()
-            self._thread = None
+    def _current(self) -> bool:
+        """True when a signal comes from the scan this dialog is still waiting for."""
+        return self._worker is not None and self.sender() is self._worker
+
+    def _done(self):
+        self._thread = self._worker = None
         self.scan_btn.setEnabled(True)
 
+    def _on_progress(self, msg: str):
+        if self._current():
+            self._say(msg)
+
     def _on_failed(self, msg: str):
-        self._stop_thread()
-        self.status.setText(f"<span style='color:#c0392b'>Scan failed: {_escape(msg)}</span>")
+        if not self._current():
+            return
+        self._done()
+        if self.result is not None:
+            msg += (f"\nThe table still shows the previous scan of {self.result.project_key}.")
+            self._set_result_buttons(True)
+        self._say(f"Scan failed: {msg}", error=True)
 
     def _on_result(self, result: DiscoveryResult):
-        self._stop_thread()
+        if not self._current():
+            return
+        self._done()
         self.result = result
         used = sum(1 for f in result.fields if f.used_in and not f.is_key)
         on_screens = sum(1 for f in result.fields if f.issue_types)
@@ -188,32 +235,33 @@ class FieldsDialog(QDialog):
                f"{on_screens} are on a create screen. Ticked: fields with values.")
         if result.warnings:
             msg += " Note: " + " ".join(result.warnings)
-        self.status.setText(_escape(msg))
+        self._say(msg)
+        self._checked = {f.id for f in result.fields if f.suggested}
         self._fill_table()
-        self._tick(lambda f: f.is_key or f.used_in > 0)
         self._set_result_buttons(True)
 
     # ---------------------------------------------------------------- table ---
 
-    def _ticked_ids(self) -> set[str]:
-        ids = set()
-        for row, f in enumerate(self._rows):
-            item = self.table.item(row, 0)
-            if item is not None and item.checkState() == Qt.Checked:
-                ids.add(f.id)
-        return ids
+    def _item_changed(self, item: QTableWidgetItem):
+        if item.column() != 0 or not 0 <= item.row() < len(self._rows):
+            return
+        fid = self._rows[item.row()].id
+        if item.checkState() == Qt.Checked:
+            self._checked.add(fid)
+        else:
+            self._checked.discard(fid)
 
     def _fill_table(self, *_):
         if not self.result:
             return
-        keep = self._ticked_ids()
+        self.table.blockSignals(True)
         self._rows = self.result.fields if self.show_all.isChecked() else self.result.relevant
         self.table.setRowCount(len(self._rows))
         sampled = self.result.sampled
         for row, f in enumerate(self._rows):
             check = QTableWidgetItem()
             check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            check.setCheckState(Qt.Checked if f.id in keep else Qt.Unchecked)
+            check.setCheckState(Qt.Checked if f.id in self._checked else Qt.Unchecked)
             used = QTableWidgetItem(f"{f.used_in} of {sampled}" if sampled else "-")
             used.setData(Qt.UserRole, f.used_in)
             cells = [check, QTableWidgetItem(f.name), QTableWidgetItem("key" if f.is_key else f.id),
@@ -221,6 +269,7 @@ class FieldsDialog(QDialog):
                      QTableWidgetItem(", ".join(sorted(f.issue_types)))]
             for col, item in enumerate(cells):
                 self.table.setItem(row, col, item)
+        self.table.blockSignals(False)
         for col in (0, 2, 3, 4):
             self.table.resizeColumnToContents(col)
         self._apply_filter(self.filter.text())
@@ -232,15 +281,15 @@ class FieldsDialog(QDialog):
             self.table.setRowHidden(row, hide)
 
     def _tick(self, rule):
-        for row, f in enumerate(self._rows):
-            item = self.table.item(row, 0)
-            if item is not None:
-                item.setCheckState(Qt.Checked if rule(f) else Qt.Unchecked)
+        if self.result:
+            self._checked = {f.id for f in self.result.fields if rule(f)}
+            self._fill_table()
 
     def selected_fields(self) -> list[FieldUsage]:
-        """Ticked fields in table order (key first, then most used)."""
-        ids = self._ticked_ids()
-        return [f for f in self._rows if f.id in ids]
+        """Ticked fields, shown or hidden, in table order (key first, then most used)."""
+        if not self.result:
+            return []
+        return [f for f in self.result.fields if f.id in self._checked]
 
     # --------------------------------------------------------------- saving ---
 
@@ -257,12 +306,11 @@ class FieldsDialog(QDialog):
             path += ".json"
         try:
             write_config(Path(path), chosen, template=self.template)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Could not save", str(exc))
             return
         self.config_saved.emit(path)
-        self.status.setText(_escape(f"Saved {len(chosen)} fields to {path}. "
-                                    "The export screen now uses this file."))
+        self._say(f"Saved {len(chosen)} fields to {path}. The export screen now uses this file.")
 
     def _save_xlsx(self):
         if not self.result:
@@ -279,17 +327,14 @@ class FieldsDialog(QDialog):
         except PermissionError:
             QMessageBox.critical(self, "Could not save", f"Cannot write {path}. Is it open in Excel?")
             return
-        self.status.setText(_escape(f"Field list saved to {path}."))
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not save", str(exc))
+            return
+        self._say(f"Field list saved to {path}.")
 
     def reject(self):
-        if self._thread is not None:
-            # Drop the scan: a result that is already queued must not reach a closed dialog.
-            for sig in (self._worker.progress, self._worker.finished, self._worker.failed):
-                sig.disconnect()
+        if self._worker is not None:
+            # Let the scan wind down in the background; its result is ignored.
             self._worker.cancel()
-            self._stop_thread()
+            self._done()
         super().reject()
-
-
-def _escape(text: str) -> str:
-    return html.escape(text)
