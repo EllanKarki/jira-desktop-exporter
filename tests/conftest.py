@@ -30,6 +30,23 @@ CREATE_SCREENS = {
     "2": ("Story", ["summary", "labels", "customfield_10002"]),
 }
 
+# Agile boards: 1 and 2 are Scrum boards in ABC, 3 is in XYZ, 7 is a Kanban board.
+BOARDS = {
+    1: {"id": 1, "name": "ABC Alpha board", "type": "scrum",
+        "location": {"projectKey": "ABC", "projectId": 10000}},
+    2: {"id": 2, "name": "ABC Beta board", "type": "scrum",
+        "location": {"projectKey": "ABC", "projectId": 10000}},
+    3: {"id": 3, "name": "XYZ board", "type": "scrum",
+        "location": {"projectKey": "XYZ", "projectId": 10001}},
+    7: {"id": 7, "name": "Support kanban", "type": "kanban"},
+}
+
+
+def initial_sprints():
+    return {1: [{"id": 100 + i, "name": f"Team Alpha Sprint {i}", "originBoardId": 1,
+                 "state": "closed" if i < 3 else "active"} for i in range(1, 4)]}
+
+
 ADF_DESC = {"type": "doc", "version": 1, "content": [
     {"type": "paragraph", "content": [{"type": "text", "text": "Hello "},
                                       {"type": "text", "text": "world", "marks": [{"type": "strong"}]}]},
@@ -89,6 +106,8 @@ class FakeJira(BaseHTTPRequestHandler):
         if self.path == ("/rest/api/3/field" if cloud else "/rest/api/2/field"):
             return self._send(200, FIELDS)
         url = urlparse(self.path)
+        if url.path.startswith("/rest/agile/1.0/"):
+            return self._agile_get(url.path.split("/")[4:], parse_qs(url.query))
         parts = url.path.split("/")[4:]  # after /rest/api/<n>/
         if url.path.startswith("/rest/api/3/" if cloud else "/rest/api/2/"):
             if parts[:1] == ["project"] and len(parts) == 2:
@@ -98,6 +117,39 @@ class FakeJira(BaseHTTPRequestHandler):
             if parts[:2] == ["issue", "createmeta"] and len(parts) in (4, 5):
                 return self._createmeta(parts, parse_qs(url.query), cloud)
         self._send(404, {"errorMessages": ["not found"]})
+
+    def _agile_get(self, parts, query):
+        if parts[:1] == ["board"] and len(parts) in (2, 3) and parts[1].isdigit():
+            board = BOARDS.get(int(parts[1]))
+            if board is None:
+                return self._send(404, {"errorMessages": ["Board does not exist or you do not "
+                                                          "have permission to see it."]})
+            if len(parts) == 2:
+                return self._send(200, board)
+            if parts[2] == "sprint":
+                if board["type"] != "scrum":
+                    return self._send(400, {"errorMessages": ["The board does not support "
+                                                              "sprints"]})
+                items = self.server.sprints.get(board["id"], [])
+                start = int(query.get("startAt", ["0"])[0])
+                n = min(2, int(query.get("maxResults", ["50"])[0]))  # force paging
+                self.server.requests.append((self.path, None))
+                return self._send(200, {"startAt": start, "maxResults": n,
+                                        "isLast": start + n >= len(items),
+                                        "values": items[start:start + n]})
+        self._send(404, {"errorMessages": ["not found"]})
+
+    def _create_sprint(self, body):
+        self.server.requests.append((self.path, body))
+        board = BOARDS.get(body.get("originBoardId"))
+        if board is None or board["type"] != "scrum":
+            return self._send(400, {"errorMessages": ["Board not found or not a Scrum board"]})
+        if not body.get("name"):
+            return self._send(400, {"errors": {"name": "Sprint name is required."}})
+        sprint = {"id": 500 + sum(len(v) for v in self.server.sprints.values()),
+                  "self": "http://jira/rest/agile/1.0/sprint/x", "state": "future", **body}
+        self.server.sprints.setdefault(board["id"], []).append(sprint)
+        self._send(201, sprint)
 
     def _createmeta(self, parts, query, cloud):
         if parts[2] != PROJECT["key"] or parts[3] != "issuetypes":
@@ -127,6 +179,8 @@ class FakeJira(BaseHTTPRequestHandler):
         if not self._authed():
             return self._send(401, {})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/rest/agile/1.0/sprint":
+            return self._create_sprint(body)
         if self.server.search_delay:
             import time
             time.sleep(self.server.search_delay)
@@ -164,6 +218,7 @@ def _serve(cloud):
     srv.cloud = cloud
     srv.createmeta_status = None  # set to e.g. 404 to mimic Jira before 8.4
     srv.search_delay = 0  # seconds, to mimic a slow Jira
+    srv.sprints = initial_sprints()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

@@ -255,7 +255,7 @@ def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
     qapp = QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
     titles = [a.text().replace("&", "") for a in win.menuBar().actions()]
-    assert titles == ["Jira", "Configuration", "Extract"]
+    assert titles == ["Jira", "Configuration", "Extract", "Jira Actions"]
     jira_items = [a.text().replace("&", "") for a in win.menuBar().actions()[0].menu().actions()
                   if not a.isSeparator()]
     assert jira_items == ["Login", "Logout", "Exit"]

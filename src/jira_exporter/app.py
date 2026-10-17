@@ -38,6 +38,7 @@ from jira_exporter.config import (
 )
 from jira_exporter.exporter import write_xlsx
 from jira_exporter.fields_dialog import FieldsDialog
+from jira_exporter.sprint_dialog import SprintDialog
 from jira_exporter.jira_client import (
     CLOUD,
     DATA_CENTER,
@@ -480,6 +481,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Jira Desktop Exporter {__version__}")
         self.resize(720, 520)
         settings = QSettings("JiraDesktopExporter", "JiraDesktopExporter")
+        self.settings = settings
+        self.sprint_dialog: SprintDialog | None = None
         self.stack = QStackedWidget()
         self.start = StartPage()
         self.login = LoginPage(settings)
@@ -520,8 +523,13 @@ class MainWindow(QMainWindow):
         self.jql_action.triggered.connect(self._show_extract)
         extract.addAction(self.jql_action)
 
+        actions = bar.addMenu("Jira &Actions")
+        self.sprint_action = QAction("Create &Sprint...", self)
+        self.sprint_action.triggered.connect(self._create_sprint)
+        actions.addAction(self.sprint_action)
+
         # Re-check what is allowed each time a menu opens (e.g. an export may be running).
-        for menu in (jira, config, extract):
+        for menu in (jira, config, extract, actions):
             menu.aboutToShow.connect(self._update_menus)
 
     def _logged_in(self) -> bool:
@@ -534,6 +542,7 @@ class MainWindow(QMainWindow):
         self.logout_action.setEnabled(logged_in and not exporting)
         self.discover_action.setEnabled(logged_in)
         self.jql_action.setEnabled(logged_in)
+        self.sprint_action.setEnabled(logged_in)
 
     def _show_login(self):
         if not self._logged_in():
@@ -552,6 +561,19 @@ class MainWindow(QMainWindow):
         if self._logged_in():
             self.export._discover_fields()
 
+    def _create_sprint(self):
+        if not self._logged_in():
+            return
+        if self.sprint_dialog is not None:
+            self.sprint_dialog.raise_()
+            self.sprint_dialog.activateWindow()
+            return
+        dialog = SprintDialog(self.export.client, self.settings, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda *_: setattr(self, "sprint_dialog", None))
+        self.sprint_dialog = dialog
+        dialog.open()
+
     def _on_login(self, client, user):
         self.export.set_session(client, user)
         name = user.get("displayName") or user.get("name", "")
@@ -561,6 +583,8 @@ class MainWindow(QMainWindow):
         self._update_menus()
 
     def _on_logout(self):
+        if self.sprint_dialog is not None:
+            self.sprint_dialog.reject()  # it holds the old session
         self.export.client = None
         self.start.set_connected(None)
         self.stack.setCurrentWidget(self.start)

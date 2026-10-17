@@ -10,8 +10,9 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
-- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields) and **Extract** (JQL Extract). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
+- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract) and **Jira Actions** (Create Sprint). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
+- **Create Sprint:** pick a team, project and sprint number, and the app creates the sprint on that team's Scrum board, using the settings in `config/sprints.xlsx`.
 
 ## Configuring fields
 
@@ -50,6 +51,40 @@ Notes:
 
 The app looks for `config/fields.json` next to the app first. You can also pick any config file with **Browse...** on the export screen.
 
+## Creating sprints
+
+Choose **Jira Actions > Create Sprint...** after logging in.
+
+### The sprint config (`config/sprints.xlsx`)
+
+One row per team and project on the **Teams** sheet. A team can have several rows, one per project. The **Help** sheet in the file explains each column.
+
+| Column | Required | Example | What it is |
+|---|---|---|---|
+| Team | yes | Team Alpha | Shown in the form's Team list. |
+| Project Key | yes | ABC | Shown in the Project list for that team. |
+| Board ID | yes | 12 | The Scrum board the sprint is created on. Open the board in Jira; the number after `rapidView=` (Data Center) or `/boards/` (Cloud) in the address is its ID. |
+| Sprint Name Format | no | `{team} Sprint {number}` | Placeholders: `{team}`, `{project}`, `{number}`. This is also the default. |
+| First Sprint Number | yes | 1 | The number of a sprint whose start date you know. |
+| First Sprint Start Date | yes | 2026-01-05 | That sprint's start date: an Excel date, or text written year-month-day. Text like 01/05/2026 is refused because it means different days in different countries. |
+| Sprint Length (days) | yes | 14 | Sprints follow on back to back: sprint N starts (N − first number) × length days after the first one, and ends when the next one starts. |
+| Start Time | no | 09:00 | Start and end time of day, in your computer's time zone. Default 09:00. |
+| Sprint Goal | no | `Sprint {number} goal` | Same placeholders as the name. |
+
+Rows with problems (an empty required cell, a date that isn't a date, and so on) are skipped and listed in the form. If the same team and project appear twice, the first row is used. **New from template...** saves an example file to fill in.
+
+### The form
+
+The form opens with the config next to the app (or the last one you picked). Choose the **Team**, **Project** and **Sprint number**. The name, start, end and goal are filled in from the config, and you can change them before creating. **Create Sprint** then:
+
+1. checks the board exists and isn't a Kanban board, and that it has no sprint with the same name (any state);
+2. asks you to confirm, noting if the board belongs to a different project;
+3. creates the sprint in the **future** state. It is not started; start it from the board in Jira as usual.
+
+After creating, the form moves on to the next sprint number, and remembers it for that team and project. Other teams and projects start at the config's First Sprint Number until you create one there.
+
+Sprint names are limited to 30 characters, the limit Atlassian documents in JSWCLOUD-17483 and JSWSERVER-16256. You need permission to manage sprints on the board's projects (**Manage Sprints**; Jira Cloud may also require **Schedule Issues**). Without it, Jira refuses and the form shows its error.
+
 ## Running from source
 
 ```bash
@@ -85,6 +120,7 @@ The tests run against a local fake Jira server, including a headless run of the 
 
 - **Data Center** uses REST API v2: `/rest/api/2/myself`, `/field`, `/search` (pages with `startAt`). **Discover fields** also uses `/project/{key}` and `/issue/createmeta/{key}/issuetypes[/{id}]`.
 - **Cloud** uses REST API v3: `/rest/api/3/myself`, `/field`, `/project/{key}`, `/issue/createmeta/{key}/issuetypes[/{id}]`, `/search/jql` (pages with `nextPageToken`), and `/search/approximate-count` for the progress bar. The older `/rest/api/3/search` has been removed from Cloud. Rich-text fields such as Description come back from Cloud in Atlassian Document Format and are converted to plain text.
+- **Create Sprint** uses the Jira Software Agile REST API on both Cloud and Data Center: `GET /rest/agile/1.0/board/{id}`, `GET /rest/agile/1.0/board/{id}/sprint` and `POST /rest/agile/1.0/sprint`.
 - Jira Cloud rejects unbounded JQL (for example `ORDER BY created` on its own). Add a condition such as `project = ABC`.
 - Data Center: if your company uses SSO-only login or has disabled basic auth, password login won't work. Use a Personal Access Token instead (Profile → Personal Access Tokens in Jira).
 - If Jira has shown you a CAPTCHA after failed logins, log in once in the browser first.
