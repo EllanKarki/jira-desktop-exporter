@@ -196,11 +196,13 @@ def test_dialog_scan_and_save(jira_server, tmp_path, monkeypatch):
     lp.username.setText("alice")
     lp.password.setText("secret")
     lp.connect_btn.click()
-    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    wait_until(qapp, lambda: win.export.client is not None)
+    assert win.stack.currentWidget() is win.start
+    win.jql_action.trigger()
 
     ep = win.export
     ep.config_path.setText(str(ROOT / "config" / "fields.json"))
-    ep.discover_btn.click()
+    win.discover_action.trigger()
     dlg = ep.fields_dialog
     assert dlg is not None and not dlg.save_btn.isEnabled()
 
@@ -406,3 +408,19 @@ def test_closing_during_a_slow_scan_does_not_freeze(jira_server, tmp_path):
     for _ in range(20):
         qapp.processEvents()
     assert dlg.result is None  # the late result was ignored
+
+
+def test_tick_all_ticks_listed_rows(jira_server, tmp_path):
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    _scan(qapp, dlg)
+    dlg.clear_btn.click()
+    dlg.filter.setText("story")
+    dlg.tick_all_btn.click()
+    assert [f.id for f in dlg.selected_fields()] == ["customfield_10002"]
+    dlg.filter.setText("")
+    dlg.tick_all_btn.click()
+    assert {f.id for f in dlg.selected_fields()} == {f.id for f in dlg.result.relevant}
+    dlg.show_all.setChecked(True)
+    dlg.tick_all_btn.click()
+    assert len(dlg.selected_fields()) == len(dlg.result.fields)
+    dlg.reject()

@@ -10,7 +10,7 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
-- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields) and **Extract** (JQL Extract). The app opens on a start screen, and the login form appears only when you choose **Jira > Login** (and again after you log out). Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
+- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields) and **Extract** (JQL Extract). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
 
 ## Configuring fields
@@ -33,11 +33,11 @@ Fields that Jira doesn't know about are skipped, and a warning appears in the lo
 
 ### Discover a project's fields
 
-Instead of looking up field ids by hand, click **Discover fields...** on the export screen:
+Instead of looking up field ids by hand, choose **Configuration > Discover fields**:
 
 1. Enter a project key (for example `ABC`) and click **Scan**.
 2. The app combines three things: every field Jira knows about, the fields on the project's create screens (per issue type), and which fields are actually filled in on the project's most recently updated issues (200 by default; set **Issues to check** to 0 to skip this).
-3. The table shows each field's name, id, type, how many of the checked issues have a value, and which issue types offer it. Fields with values are ticked to start with. Use the filter box to find a field, and tick **Show fields the project doesn't use** to see everything.
+3. The table shows each field's name, id, type, how many of the checked issues have a value, and which issue types offer it. Fields with values are ticked to start with. **Tick all** ticks every field listed (respecting the filter), and **Untick all** clears them. Use the filter box to find a field, and tick **Show fields the project doesn't use** to see everything.
 4. Click **Save as fields.json...**. The ticked fields are written by `id` with the Jira name as the column `header`, other settings (like `max_results_per_page`) are kept from the config you had open, and the export screen switches to the new file. Edit it afterwards to reorder or rename columns.
 
 **Export field list to Excel...** saves the whole table (used and unused fields) as a reference.
