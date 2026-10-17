@@ -237,3 +237,54 @@ def test_relogin_clears_previous_result(tmp_path):
     ep.set_session(FakeClient(), {"displayName": "Bob"})
     assert ep.progress_label.text() == ""
     assert ep.progress.value() == 0
+
+
+def test_menus_follow_login_state(jira_server, tmp_path, monkeypatch):
+    _fresh_settings(tmp_path)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    qapp = QApplication.instance() or QApplication([])
+    win = appmod.MainWindow()
+    titles = [a.text().replace("&", "") for a in win.menuBar().actions()]
+    assert titles == ["Jira", "Configuration", "Extract"]
+    jira_items = [a.text().replace("&", "") for a in win.menuBar().actions()[0].menu().actions()
+                  if not a.isSeparator()]
+    assert jira_items == ["Login", "Logout", "Exit"]
+
+    # Logged out: only Login and Exit are available.
+    assert win.login_action.isEnabled() and win.exit_action.isEnabled()
+    for a in (win.logout_action, win.discover_action, win.jql_action):
+        assert not a.isEnabled()
+
+    lp = win.login
+    lp.url.setText(f"http://127.0.0.1:{jira_server.server_address[1]}")
+    lp.username.setText("alice")
+    lp.password.setText("secret")
+    lp.connect_btn.click()
+    wait_until(qapp, lambda: win.stack.currentWidget() is win.export)
+    assert not win.login_action.isEnabled()
+    for a in (win.logout_action, win.discover_action, win.jql_action):
+        assert a.isEnabled()
+
+    win.discover_action.trigger()
+    dlg = win.export.fields_dialog
+    assert dlg is not None and dlg.isVisible()
+    dlg.reject()
+
+    # Logout is greyed out while an export runs.
+    win.export.export_btn.setEnabled(False)
+    win._update_menus()
+    assert not win.logout_action.isEnabled()
+    win.export.export_btn.setEnabled(True)
+
+    win.jql_action.trigger()
+    assert win.stack.currentWidget() is win.export
+    win.logout_action.setEnabled(True)
+    win.logout_action.trigger()
+    assert win.stack.currentWidget() is win.login and win.export.client is None
+    assert win.login_action.isEnabled() and not win.jql_action.isEnabled()
+    win.login_action.trigger()
+    assert win.stack.currentWidget() is win.login
+
+    win.show()
+    win.exit_action.trigger()
+    assert not win.isVisible()
