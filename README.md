@@ -10,10 +10,11 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
-- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
+- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report, Velocity Chart). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
 - **Create Sprint:** pick a team, project and sprint number, and the app creates the sprint on that team's Scrum board, using the settings in `config/sprints.xlsx`.
 - **Sprint Report:** a table of each team's recent closed sprints: committed, completed and spilled issues and story points, how many issues changed during the sprint, and the completion percentage. Export it to Excel.
+- **Velocity Chart:** a bar chart of one team's committed vs completed story points over its recent closed sprints, with the average velocity. Export it to Excel (with the chart) or save the chart as an image.
 
 ## Configuring fields
 
@@ -110,6 +111,21 @@ Notes:
 - "Story points" are whatever the board estimates with (**Board settings > Estimation**), usually the Story Points field. The status line names the field.
 - Only sprints created on the team's board are listed, not sprints from other boards that share its issues. Active and future sprints are left out.
 - Issues Jira lists as "completed outside this sprint" are left out of every column.
+
+## Velocity Chart
+
+Choose **Reports > Velocity Chart...** after logging in. Like the Sprint Report it reads the teams and boards from `config/sprints.xlsx`.
+
+Pick a team and how many of its most recent closed sprints to show (7 to start with), then click **Run report**. For each sprint the chart shows two bars:
+
+- **Committed:** story points in the sprint when it started, with their estimates at the start.
+- **Completed:** story points of the issues done when the sprint closed, including issues added after the start.
+
+These are the same numbers as the Sprint Report's committed and completed story points, so the two reports always agree. The table under the chart lists them with the completion percentage, and the status line gives the **average velocity**: the mean completed story points per sprint shown. When every sprint name starts with the team name, the chart leaves it off the labels ("Sprint 01").
+
+**Export to Excel...** saves the table, the average and a bar chart that Excel draws from the table. **Save chart image...** saves the chart as a PNG to paste into a slide or an email.
+
+The notes under the Sprint Report about where the numbers come from apply here too.
 
 ## Running from source
 

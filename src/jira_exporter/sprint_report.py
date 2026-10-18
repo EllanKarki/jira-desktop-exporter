@@ -53,12 +53,12 @@ class SprintRow:
 
     def values(self) -> list:
         """The row in COLUMNS order."""
-        return [self.team, self.sprint, self.committed, _number(self.committed_points),
-                self.completed, _number(self.completed_points), self.spilled,
-                _number(self.spilled_points), self.adjusted, self.percent]
+        return [self.team, self.sprint, self.committed, tidy_points(self.committed_points),
+                self.completed, tidy_points(self.completed_points), self.spilled,
+                tidy_points(self.spilled_points), self.adjusted, self.percent]
 
 
-def _number(points: float):
+def tidy_points(points: float):
     """3.0 -> 3, so whole story points don't show a trailing .0."""
     return int(points) if float(points).is_integer() else round(points, 2)
 

@@ -40,6 +40,7 @@ from jira_exporter.exporter import write_xlsx
 from jira_exporter.fields_dialog import FieldsDialog
 from jira_exporter.report_dialog import SprintReportDialog
 from jira_exporter.sprint_dialog import SprintDialog
+from jira_exporter.velocity_dialog import VelocityDialog
 from jira_exporter.jira_client import (
     CLOUD,
     DATA_CENTER,
@@ -474,7 +475,7 @@ class StartPage(QWidget):
             self.hint.setText(f"{html.escape(description)}<br><br>"
                               "Choose <b>Extract &gt; JQL Extract</b> to export issues, or "
                               "<b>Configuration &gt; Discover fields</b> to pick the fields, or "
-                              "<b>Reports &gt; Sprint Report</b> for sprint results.")
+                              "<b>Reports</b> for sprint results and velocity.")
 
 
 class MainWindow(QMainWindow):
@@ -486,6 +487,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.sprint_dialog: SprintDialog | None = None
         self.report_dialog: SprintReportDialog | None = None
+        self.velocity_dialog: VelocityDialog | None = None
         self.stack = QStackedWidget()
         self.start = StartPage()
         self.login = LoginPage(settings)
@@ -535,6 +537,9 @@ class MainWindow(QMainWindow):
         self.sprint_report_action = QAction("Sprint &Report...", self)
         self.sprint_report_action.triggered.connect(self._sprint_report)
         reports.addAction(self.sprint_report_action)
+        self.velocity_action = QAction("&Velocity Chart...", self)
+        self.velocity_action.triggered.connect(self._velocity_chart)
+        reports.addAction(self.velocity_action)
 
         # Re-check what is allowed each time a menu opens (e.g. an export may be running).
         for menu in (jira, config, extract, actions, reports):
@@ -552,6 +557,7 @@ class MainWindow(QMainWindow):
         self.jql_action.setEnabled(logged_in)
         self.sprint_action.setEnabled(logged_in)
         self.sprint_report_action.setEnabled(logged_in)
+        self.velocity_action.setEnabled(logged_in)
 
     def _show_login(self):
         if not self._logged_in():
@@ -596,6 +602,19 @@ class MainWindow(QMainWindow):
         self.report_dialog = dialog
         dialog.open()
 
+    def _velocity_chart(self):
+        if not self._logged_in():
+            return
+        if self.velocity_dialog is not None:
+            self.velocity_dialog.raise_()
+            self.velocity_dialog.activateWindow()
+            return
+        dialog = VelocityDialog(self.export.client, self.settings, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda *_: setattr(self, "velocity_dialog", None))
+        self.velocity_dialog = dialog
+        dialog.open()
+
     def _on_login(self, client, user):
         self.export.set_session(client, user)
         name = user.get("displayName") or user.get("name", "")
@@ -607,8 +626,9 @@ class MainWindow(QMainWindow):
     def _on_logout(self):
         if self.sprint_dialog is not None:
             self.sprint_dialog.reject()  # it holds the old session
-        if self.report_dialog is not None:
-            self.report_dialog.reject()
+        for dialog in (self.report_dialog, self.velocity_dialog):
+            if dialog is not None:
+                dialog.reject()
         self.export.client = None
         self.start.set_connected(None)
         self.stack.setCurrentWidget(self.start)
