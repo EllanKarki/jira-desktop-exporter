@@ -425,7 +425,8 @@ def test_menu_opens_create_sprint_only_when_logged_in(jira_server, tmp_path, mon
     qapp = QApplication.instance() or QApplication([])
     win = appmod.MainWindow()
     titles = [a.text() for a in win.menuBar().actions()]
-    assert titles == ["&Jira", "&Configuration", "E&xtract", "Jira &Actions"]
+    assert titles == ["&Jira", "&Configuration", "E&xtract", "Jira &Actions",
+                      "&Reports"]
     assert not win.sprint_action.isEnabled()
     win.sprint_action.trigger()
     assert win.sprint_dialog is None

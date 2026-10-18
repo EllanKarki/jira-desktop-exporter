@@ -10,9 +10,10 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
-- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract) and **Jira Actions** (Create Sprint). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
+- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
 - **Create Sprint:** pick a team, project and sprint number, and the app creates the sprint on that team's Scrum board, using the settings in `config/sprints.xlsx`.
+- **Sprint Report:** a table of each team's recent closed sprints: committed, completed and spilled issues and story points, how many issues changed during the sprint, and the completion percentage. Export it to Excel.
 
 ## Configuring fields
 
@@ -84,6 +85,31 @@ The form opens with the config next to the app (or the last one you picked). Cho
 After creating, the form moves on to the next sprint number at the same width (`01` → `02`, `09` → `10`), and remembers it for that team and project. Other teams and projects start at the config's First Sprint Number until you create one there.
 
 Sprint names are limited to 30 characters, the limit Atlassian documents in JSWCLOUD-17483 and JSWSERVER-16256. You need permission to manage sprints on the board's projects (**Manage Sprints**; Jira Cloud may also require **Schedule Issues**). Without it, Jira refuses and the form shows its error.
+
+## Sprint Report
+
+Choose **Reports > Sprint Report...** after logging in. It uses the same `config/sprints.xlsx` as Create Sprint: each team's **Board ID** says where its sprints are.
+
+Pick a team (or **All teams**) and how many of each board's most recent closed sprints to include, then click **Run report**. Each row is one team and sprint:
+
+| Column | What it counts |
+|---|---|
+| Team Name | The team from the sprint config. |
+| Sprint Name | The sprint's name in Jira. |
+| Committed Issues / Story Points | Issues in the sprint when it started, with their estimates at the start. |
+| Completed Issues / Story Points | Issues done when the sprint closed, with their final estimates. Issues added after the start count here too, as in Jira's own sprint report. |
+| Spill Over Issues / Story Points | Issues still not done when the sprint closed. |
+| Issues Adjusted During Sprint | Issues added after the start plus issues removed before the end. An issue added and then removed counts twice. |
+| % Completed vs Committed | Completed story points ÷ committed story points. It can go over 100% when work was added, and is empty when nothing was estimated at the start. |
+
+Click a column header to sort, and **Export to Excel...** to save the table.
+
+Notes:
+
+- The numbers come from the same data as Jira's own Sprint Report on the board (`/rest/greenhopper/1.0/rapid/charts/sprintreport`). Atlassian doesn't document that endpoint as a public API, so a future Jira version could change it.
+- "Story points" are whatever the board estimates with (**Board settings > Estimation**), usually the Story Points field. The status line names the field.
+- Only sprints created on the team's board are listed, not sprints from other boards that share its issues. Active and future sprints are left out.
+- Issues Jira lists as "completed outside this sprint" are left out of every column.
 
 ## Running from source
 
