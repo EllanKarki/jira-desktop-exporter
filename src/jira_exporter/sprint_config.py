@@ -27,6 +27,8 @@ REQUIRED = [TEAM, PROJECT, BOARD, FIRST_NUMBER, FIRST_START, LENGTH]
 
 DEFAULT_NAME_FORMAT = "{team} Sprint {number}"
 DEFAULT_START_TIME = time(9, 0)
+# Sprint numbers are shown and named with at least this many digits: 01, 02 ... 10.
+NUMBER_DIGITS = 2
 
 
 class SprintConfigError(Exception):
@@ -56,11 +58,29 @@ class SprintPlan:
     goal: str
 
 
-def plan_sprint(cfg: TeamConfig, number: int) -> SprintPlan:
-    """Sprint `number` starts (number - first) sprint lengths after the first sprint starts,
-    and ends when the next one starts."""
-    if number < 1:
+def sprint_label(number: int | str) -> str:
+    """The sprint number as used in names: digits, zero-padded to NUMBER_DIGITS ("1" -> "01").
+    Typing more digits keeps them ("001")."""
+    text = str(number).strip()
+    if not text:
+        raise SprintConfigError("Enter the sprint number, like 01.")
+    if not text.isdigit() or not text.isascii():
+        raise SprintConfigError(f"The sprint number must be digits only, like 01, not '{text}'.")
+    if int(text) < 1:
         raise SprintConfigError("The sprint number must be 1 or more.")
+    return text.zfill(NUMBER_DIGITS)
+
+
+def next_label(label: str) -> str:
+    """The following sprint's number, keeping the same width: 01 -> 02, 09 -> 10, 99 -> 100."""
+    return str(int(sprint_label(label)) + 1).zfill(len(sprint_label(label)))
+
+
+def plan_sprint(cfg: TeamConfig, number: int | str) -> SprintPlan:
+    """Sprint `number` starts (number - first) sprint lengths after the first sprint starts,
+    and ends when the next one starts. `number` may be text such as "01"."""
+    label = sprint_label(number)
+    number = int(label)
     try:
         start = datetime.combine(cfg.first_start, cfg.start_time) + \
             timedelta(days=(number - cfg.first_number) * cfg.length_days)
@@ -68,7 +88,7 @@ def plan_sprint(cfg: TeamConfig, number: int) -> SprintPlan:
     except OverflowError as exc:
         raise SprintConfigError(f"Sprint {number} would start outside the dates a computer "
                                 "can handle; check the number and the config.") from exc
-    values = {"team": cfg.team, "project": cfg.project_key, "number": number}
+    values = {"team": cfg.team, "project": cfg.project_key, "number": label}
     return SprintPlan(_fill(cfg.name_format, values, cfg.row, NAME_FORMAT).strip(),
                       cfg.board_id, start, end,
                       _fill(cfg.goal, values, cfg.row, GOAL).strip())
@@ -223,7 +243,8 @@ NOTES = [
     ("Board ID", "The Scrum board the sprint is created on. Open the board in Jira: the "
                  "number after rapidView= or /boards/ in the address is its ID."),
     ("Sprint Name Format", "Optional. Placeholders: {team}, {project}, {number}. "
-                           f"Default: {DEFAULT_NAME_FORMAT}"),
+                           f"Default: {DEFAULT_NAME_FORMAT}. {{number}} is written with at "
+                           f"least {NUMBER_DIGITS} digits: 01, 02 ... 10."),
     ("First Sprint Number", "The number of a sprint whose start date you know."),
     ("First Sprint Start Date", "That sprint's start date, as an Excel date or text like "
                                 "2026-01-05. Later sprints follow on back to back, one "

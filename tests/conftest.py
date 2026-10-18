@@ -43,7 +43,7 @@ BOARDS = {
 
 
 def initial_sprints():
-    return {1: [{"id": 100 + i, "name": f"Team Alpha Sprint {i}", "originBoardId": 1,
+    return {1: [{"id": 100 + i, "name": f"Team Alpha Sprint {i:02d}", "originBoardId": 1,
                  "state": "closed" if i < 3 else "active"} for i in range(1, 4)]}
 
 

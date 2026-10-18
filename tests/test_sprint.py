@@ -162,7 +162,7 @@ def test_client_board_sprints_and_create(jira_server, cloud_server, cloud):
     srv = cloud_server if cloud else jira_server
     c = client(srv, CLOUD if cloud else "datacenter")
     assert c.board(1)["type"] == "scrum"
-    assert [s["name"] for s in c.board_sprints(1)] == [f"Team Alpha Sprint {i}" for i in (1, 2, 3)]
+    assert [s["name"] for s in c.board_sprints(1)] == [f"Team Alpha Sprint {i:02d}" for i in (1, 2, 3)]
     pages = [p for p, _ in srv.requests if p.startswith("/rest/agile/1.0/board/1/sprint")]
     assert len(pages) == 2  # followed the paging
     made = c.create_sprint("Team Alpha Sprint 4", 1, "2026-02-02T09:00:00.000+05:30",
@@ -226,44 +226,44 @@ def test_dialog_lists_teams_and_projects(dialog):
     assert [dlg.team.itemText(i) for i in range(dlg.team.count())] == \
         ["Team Alpha", "Team Beta", "Team Kanban", "Team Lost"]
     assert [dlg.project.itemText(i) for i in range(dlg.project.count())] == ["ABC", "XYZ"]
-    assert dlg.name.text() == "Team Alpha Sprint 1"
-    dlg.number.setValue(4)
-    assert dlg.name.text() == "Team Alpha Sprint 4"
-    assert dlg.goal.text() == "Goal 4"
+    assert dlg.name.text() == "Team Alpha Sprint 01"
+    dlg.number.setText("04")
+    assert dlg.name.text() == "Team Alpha Sprint 04"
+    assert dlg.goal.text() == "Goal 04"
     assert dlg.start.dateTime().toPython() == datetime(2026, 2, 16, 9)
     assert dlg.end.dateTime().toPython() == datetime(2026, 3, 2, 9)
     dlg.project.setCurrentText("XYZ")
-    assert (dlg.number.value(), dlg.name.text()) == (10, "XYZ-10")
+    assert (dlg.number.text(), dlg.name.text()) == ("10", "XYZ-10")
     assert dlg.start.dateTime().toPython() == datetime(2026, 3, 2, 9)
     _pick(dlg, "Team Beta")
-    assert dlg.number.value() == 1 and dlg.name.text() == "Beta 1"
+    assert dlg.number.text() == "01" and dlg.name.text() == "Beta 01"
     assert dlg.start.dateTime().toPython() == datetime(2026, 1, 12, 10, 30)
     assert "5 team/project rows loaded" in dlg.status.text()
 
 
 def test_dialog_creates_sprint_after_confirming(dialog, jira_server):
     qapp, dlg, asked, _ = dialog
-    dlg.number.setValue(4)
+    dlg.number.setText("04")
     dlg.goal.setText("Edited goal")
     _create(qapp, dlg)
-    assert "Created sprint 'Team Alpha Sprint 4'" in dlg.status.text(), dlg.status.text()
-    assert "Name: Team Alpha Sprint 4" in asked[0] and "Board: ABC Alpha board (1)" in asked[0]
+    assert "Created sprint 'Team Alpha Sprint 04'" in dlg.status.text(), dlg.status.text()
+    assert "Name: Team Alpha Sprint 04" in asked[0] and "Board: ABC Alpha board (1)" in asked[0]
     path, body = jira_server.requests[-1]
     assert path == "/rest/agile/1.0/sprint"
-    assert body["name"] == "Team Alpha Sprint 4" and body["originBoardId"] == 1
+    assert body["name"] == "Team Alpha Sprint 04" and body["originBoardId"] == 1
     assert body["goal"] == "Edited goal"
     assert body["startDate"].startswith("2026-02-16T09:00:00.000")
     assert body["endDate"].startswith("2026-03-02T09:00:00.000")
     assert dlg.created["state"] == "future"
-    assert dlg.number.value() == 5 and dlg.name.text() == "Team Alpha Sprint 5"
+    assert dlg.number.text() == "05" and dlg.name.text() == "Team Alpha Sprint 05"
     assert dlg.settings.value("sprint_team") == "Team Alpha"
 
 
 def test_dialog_refuses_existing_sprint_name(dialog, jira_server):
     qapp, dlg, asked, _ = dialog
-    dlg.number.setValue(2)
+    dlg.number.setText("02")
     _create(qapp, dlg)
-    assert "already has a closed sprint called 'Team Alpha Sprint 2'" in dlg.status.text()
+    assert "already has a closed sprint called 'Team Alpha Sprint 02'" in dlg.status.text()
     assert asked == []
     assert not any(p == "/rest/agile/1.0/sprint" for p, _ in jira_server.requests)
     assert dlg.create_btn.isEnabled()
@@ -300,7 +300,7 @@ def test_dialog_checks_form_before_calling_jira(dialog, jira_server):
     dlg.name.setText("A sprint name that is too long, 37")
     dlg.create_btn.click()
     assert "up to 30 characters" in dlg.status.text()
-    dlg.number.setValue(5)
+    dlg.number.setText("05")
     dlg.end.setDateTime(dlg.start.dateTime())
     dlg.create_btn.click()
     assert dlg.status.text() == "The end must be after the start."
@@ -337,28 +337,28 @@ def test_dialog_close_while_checking(jira_server, dialog):
 
 def test_dialog_remembers_next_number_per_team_and_project(dialog, jira_server):
     qapp, dlg, _, _ = dialog
-    dlg.number.setValue(4)
+    dlg.number.setText("04")
     _create(qapp, dlg)
-    assert dlg.number.value() == 5
+    assert dlg.number.text() == "05"
     _pick(dlg, "Team Beta")
-    dlg.number.setValue(50)
+    dlg.number.setText("50")
     _pick(dlg, "Team Alpha", "XYZ")
-    assert dlg.number.value() == 10  # XYZ's own first number, not Beta's 50
+    assert dlg.number.text() == "10"  # XYZ's own first number, not Beta's 50
     dlg.project.setCurrentText("ABC")
-    assert (dlg.number.value(), dlg.name.text()) == (5, "Team Alpha Sprint 5")
+    assert (dlg.number.text(), dlg.name.text()) == ("05", "Team Alpha Sprint 05")
     _pick(dlg, "Team Beta")
-    assert dlg.number.value() == 1
+    assert dlg.number.text() == "01"
 
 
 def test_dialog_reopens_on_last_team_and_project(dialog, jira_server):
     from jira_exporter.sprint_dialog import SprintDialog
     qapp, dlg, _, _ = dialog
     _pick(dlg, "Team Alpha", "XYZ")
-    dlg.number.setValue(11)
+    dlg.number.setText("11")
     _create(qapp, dlg)
     again = SprintDialog(dlg.client, dlg.settings, None)
     assert (again.team.currentText(), again.project.currentText()) == ("Team Alpha", "XYZ")
-    assert again.number.value() == 12
+    assert again.number.text() == "12"
     again.reject()
 
 
@@ -367,12 +367,43 @@ def test_dialog_bad_name_format_clears_the_form(dialog, tmp_path):
     rows = [ROWS[0], ["Team Bad", "ABC", 1, "{team[x]}", 1, date(2026, 1, 5), 14, None, ""]]
     dlg.config_path.setText(str(write_rows(tmp_path / "bad.xlsx", rows)))
     dlg.load_config()
-    assert dlg.name.text() == "Team Alpha Sprint 1"
+    assert dlg.name.text() == "Team Alpha Sprint 01"
     _pick(dlg, "Team Bad")
     assert "placeholders" in dlg.status.text()
     assert dlg.name.text() == "" and not dlg.create_btn.isEnabled()
     _pick(dlg, "Team Alpha")
     assert dlg.create_btn.isEnabled()
+
+
+def test_sprint_number_keeps_leading_zeros():
+    from jira_exporter.sprint_config import next_label, sprint_label
+    assert [sprint_label(x) for x in (1, "1", "01", "001", " 7 ", "10", 123)] == \
+        ["01", "01", "01", "001", "07", "10", "123"]
+    assert [next_label(x) for x in ("01", "09", "99", "001", "1")] == \
+        ["02", "10", "100", "002", "02"]
+    for bad in ("", "0", "00", "1a", "-1", "１"):
+        with pytest.raises(SprintConfigError):
+            sprint_label(bad)
+    p = plan_sprint(_cfg(first_number=1, goal="Goal {number}"), "03")
+    assert (p.name, p.goal, p.start) == ("Team Alpha Sprint 03", "Goal 03", datetime(2026, 2, 2, 9))
+    assert plan_sprint(_cfg(), "0010").name == "Team Alpha Sprint 0010"
+
+
+def test_dialog_number_is_text_with_leading_zeros(dialog, jira_server):
+    qapp, dlg, _, _ = dialog
+    assert dlg.number.text() == "01"
+    dlg.number.setText("7")
+    assert dlg.name.text() == "Team Alpha Sprint 07" and dlg.goal.text() == "Goal 07"
+    dlg.number.editingFinished.emit()
+    assert dlg.number.text() == "07"
+    dlg.number.setText("")
+    assert "Enter the sprint number" in dlg.status.text() and not dlg.create_btn.isEnabled()
+    dlg.number.setText("09")
+    _create(qapp, dlg)
+    assert jira_server.requests[-1][1]["name"] == "Team Alpha Sprint 09"
+    assert dlg.number.text() == "10" and dlg.name.text() == "Team Alpha Sprint 10"
+    from PySide6.QtGui import QValidator
+    assert dlg.number.validator().validate("1a", 0)[0] == QValidator.Invalid
 
 
 def test_plan_sprint_far_out_numbers():
