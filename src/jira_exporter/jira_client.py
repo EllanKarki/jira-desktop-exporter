@@ -158,6 +158,23 @@ class JiraClient:
         """All sprints on a board (future, active and closed)."""
         return self._paged_values(f"{self.AGILE}/board/{int(board_id)}/sprint", ("values",))
 
+    def sprint_report(self, board_id: int, sprint_id: int) -> dict:
+        """The data behind Jira's own Sprint Report: issues completed, not completed and
+        removed, which were added after the start, and their estimates then and now.
+
+        This is the endpoint Jira's board UI uses (/rest/greenhopper/1.0). Atlassian
+        doesn't document it as a public API, but Cloud and Data Center both serve it."""
+        try:
+            return self._request("GET", "/rest/greenhopper/1.0/rapid/charts/sprintreport",
+                                 params={"rapidViewId": int(board_id),
+                                         "sprintId": int(sprint_id)})
+        except JiraError as exc:
+            if exc.status == 404:
+                raise JiraError(f"Jira has no sprint report for sprint {sprint_id} on board "
+                                f"{board_id}, or this Jira doesn't offer sprint reports.",
+                                404) from exc
+            raise
+
     def create_sprint(self, name: str, board_id: int, start: str | None = None,
                       end: str | None = None, goal: str | None = None) -> dict:
         """Create a future sprint on a board. Dates are ISO 8601 strings with an offset."""

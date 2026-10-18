@@ -47,6 +47,37 @@ def initial_sprints():
                  "state": "closed" if i < 3 else "active"} for i in range(1, 4)]}
 
 
+def _est(points):
+    return {"statFieldId": "customfield_10002",
+            "statFieldValue": {"value": points} if points is not None else {}}
+
+
+def _ri(key, start, now=None):
+    """A sprint report issue with its estimate at the start and now."""
+    return {"key": key, "estimateStatistic": _est(start),
+            "currentEstimateStatistic": _est(start if now is None else now)}
+
+
+# Jira's sprint report per (board, sprint). Sprint 101 started with ABC-1..5 (21 points);
+# ABC-6 was added and finished, ABC-7 was added then removed, ABC-5 was removed, ABC-1
+# was re-estimated from 5 to 8 before it was done, and ABC-3/ABC-4 were left unfinished.
+SPRINT_REPORTS = {
+    (1, 101): {"contents": {
+        "completedIssues": [_ri("ABC-1", 5, 8), _ri("ABC-2", 3), _ri("ABC-6", 2)],
+        "issuesNotCompletedInCurrentSprint": [_ri("ABC-3", 5), _ri("ABC-4", None)],
+        "puntedIssues": [_ri("ABC-5", 8), _ri("ABC-7", 1)],
+        "issuesCompletedInAnotherSprint": [_ri("ABC-9", 13)],
+        "issueKeysAddedDuringSprint": {"ABC-6": True, "ABC-7": True},
+    }, "sprint": {"id": 101, "name": "Team Alpha Sprint 01", "state": "CLOSED"}},
+    (1, 102): {"contents": {
+        "completedIssues": [_ri("ABC-3", 5), _ri("ABC-4", 3)],
+        "issuesNotCompletedInCurrentSprint": [],
+        "puntedIssues": [],
+        "issueKeysAddedDuringSprint": {},
+    }, "sprint": {"id": 102, "name": "Team Alpha Sprint 02", "state": "CLOSED"}},
+}
+
+
 ADF_DESC = {"type": "doc", "version": 1, "content": [
     {"type": "paragraph", "content": [{"type": "text", "text": "Hello "},
                                       {"type": "text", "text": "world", "marks": [{"type": "strong"}]}]},
@@ -106,6 +137,13 @@ class FakeJira(BaseHTTPRequestHandler):
         if self.path == ("/rest/api/3/field" if cloud else "/rest/api/2/field"):
             return self._send(200, FIELDS)
         url = urlparse(self.path)
+        if url.path == "/rest/greenhopper/1.0/rapid/charts/sprintreport":
+            q = parse_qs(url.query)
+            self.server.requests.append((self.path, None))
+            report = SPRINT_REPORTS.get((int(q["rapidViewId"][0]), int(q["sprintId"][0])))
+            if report is None:
+                return self._send(404, {"errorMessages": ["not found"]})
+            return self._send(200, report)
         if url.path.startswith("/rest/agile/1.0/"):
             return self._agile_get(url.path.split("/")[4:], parse_qs(url.query))
         parts = url.path.split("/")[4:]  # after /rest/api/<n>/
