@@ -6,7 +6,8 @@ import json
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QDateTime, QObject, QRegularExpression, QSettings, Qt, Signal
+from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QDateTimeEdit,
@@ -18,7 +19,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
 )
 
@@ -30,7 +30,9 @@ from jira_exporter.sprint_config import (
     TeamConfig,
     jira_datetime,
     load_teams,
+    next_label,
     plan_sprint,
+    sprint_label,
     write_template,
 )
 
@@ -122,9 +124,13 @@ class SprintDialog(QDialog):
         self.team.currentIndexChanged.connect(self._team_changed)
         self.project = QComboBox()
         self.project.currentIndexChanged.connect(self._project_changed)
-        self.number = QSpinBox()
-        self.number.setRange(1, 99999)
-        self.number.valueChanged.connect(self._refresh_plan)
+        # Text, not a spin box, so leading zeros are kept: 01, 02 ...
+        self.number = QLineEdit()
+        self.number.setValidator(QRegularExpressionValidator(QRegularExpression(r"\d{0,6}")))
+        self.number.setPlaceholderText("e.g. 01")
+        self.number.setMaximumWidth(120)
+        self.number.textChanged.connect(self._refresh_plan)
+        self.number.editingFinished.connect(self._pad_number)
 
         self.name = QLineEdit()
         self.start = QDateTimeEdit()
@@ -244,8 +250,13 @@ class SprintDialog(QDialog):
         created here, or the config's first sprint number."""
         cfg = self.selected()
         if cfg:
+            saved = self._next_numbers().get(_key(cfg))
+            try:
+                label = sprint_label(saved if saved is not None else cfg.first_number)
+            except SprintConfigError:
+                label = sprint_label(cfg.first_number)
             self.number.blockSignals(True)
-            self.number.setValue(self._next_numbers().get(_key(cfg), cfg.first_number))
+            self.number.setText(label)
             self.number.blockSignals(False)
         self._refresh_plan()
 
@@ -256,9 +267,18 @@ class SprintDialog(QDialog):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _remember_next(self, cfg: TeamConfig, number: int):
+    def _pad_number(self):
+        """Show the number as it will be used: 1 -> 01."""
+        try:
+            label = sprint_label(self.number.text())
+        except SprintConfigError:
+            return
+        if label != self.number.text():
+            self.number.setText(label)
+
+    def _remember_next(self, cfg: TeamConfig, label: str):
         data = self._next_numbers()
-        data[_key(cfg)] = number
+        data[_key(cfg)] = label
         self.settings.setValue("sprint_next_numbers", json.dumps(data))
 
     def selected(self) -> TeamConfig | None:
@@ -271,7 +291,7 @@ class SprintDialog(QDialog):
         plan = None
         if cfg is not None:
             try:
-                plan = plan_sprint(cfg, self.number.value())
+                plan = plan_sprint(cfg, self.number.text())
             except SprintConfigError as exc:
                 self._say(str(exc), error=True)
         if plan is None:
@@ -377,11 +397,12 @@ class SprintDialog(QDialog):
             self._run("create", plan, cfg.project_key)
             return
         self.created = result
-        self._remember_next(cfg, self.number.value() + 1)
+        label = next_label(self.number.text())
+        self._remember_next(cfg, label)
         self._say(f"Created sprint '{result.get('name', plan.name)}' (id {result.get('id')}, "
                   f"{result.get('state', 'future')}) on board {plan.board_id}.")
-        if self.number.value() < self.number.maximum():
-            self.number.setValue(self.number.value() + 1)  # ready for the next one
+        if len(label) <= 6:
+            self.number.setText(label)  # ready for the next one
             self._say(self.status.text() + " The form now shows the next sprint.")
 
     def reject(self):
