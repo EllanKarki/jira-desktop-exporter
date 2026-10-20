@@ -78,6 +78,44 @@ SPRINT_REPORTS = {
 }
 
 
+def local_ms(*args):
+    """Milliseconds since 1970 for a local date and time, as Jira sends them."""
+    from datetime import datetime
+    return int(datetime(*args).timestamp() * 1000)
+
+
+def _chg(key, added=None, est=None, done=None):
+    c = {"key": key}
+    if added is not None:
+        c["added"] = added
+    if est is not None:
+        c["statC"] = {"newValue": est}
+    if done is not None:
+        c["column"] = {"done": done, "notDone": not done, "newStatus": "1"}
+    return c
+
+
+# Jira's scope change data per (board, sprint). Sprint 101 runs 5-9 January 2026 and
+# starts with ABC-1 (5), ABC-2 (3) and ABC-3 (8): 16 points.
+BURNDOWNS = {
+    (1, 101): {
+        "startTime": local_ms(2026, 1, 5, 9), "endTime": local_ms(2026, 1, 9, 9),
+        "completeTime": local_ms(2026, 1, 9, 8), "now": local_ms(2026, 2, 1, 12),
+        "changes": {
+            str(local_ms(2026, 1, 5, 8)): [_chg("ABC-1", True, 5), _chg("ABC-2", True, 3),
+                                           _chg("ABC-3", True, 8)],
+            str(local_ms(2026, 1, 6, 10)): [_chg("ABC-1", done=True)],
+            str(local_ms(2026, 1, 7, 11)): [_chg("ABC-4", True, 2)],
+            str(local_ms(2026, 1, 7, 15)): [_chg("ABC-3", est=5)],
+            str(local_ms(2026, 1, 8, 9)): [_chg("ABC-2", done=True)],
+            str(local_ms(2026, 1, 8, 12)): [_chg("ABC-2", done=False)],
+            str(local_ms(2026, 1, 8, 13)): [_chg("ABC-2", done=True)],
+            str(local_ms(2026, 1, 8, 16)): [_chg("ABC-4", False)],
+        },
+    },
+}
+
+
 ADF_DESC = {"type": "doc", "version": 1, "content": [
     {"type": "paragraph", "content": [{"type": "text", "text": "Hello "},
                                       {"type": "text", "text": "world", "marks": [{"type": "strong"}]}]},
@@ -144,6 +182,13 @@ class FakeJira(BaseHTTPRequestHandler):
             if report is None:
                 return self._send(404, {"errorMessages": ["not found"]})
             return self._send(200, report)
+        if url.path == "/rest/greenhopper/1.0/rapid/charts/scopechangeburndownchart":
+            q = parse_qs(url.query)
+            self.server.requests.append((self.path, None))
+            data = BURNDOWNS.get((int(q["rapidViewId"][0]), int(q["sprintId"][0])))
+            if data is None:
+                return self._send(404, {"errorMessages": ["not found"]})
+            return self._send(200, data)
         if url.path.startswith("/rest/agile/1.0/"):
             return self._agile_get(url.path.split("/")[4:], parse_qs(url.query))
         parts = url.path.split("/")[4:]  # after /rest/api/<n>/

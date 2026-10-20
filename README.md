@@ -10,11 +10,12 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
-- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report, Velocity Chart). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
+- **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report, Velocity Chart, Burndown Chart). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
 - **Create Sprint:** pick a team, project and sprint number, and the app creates the sprint on that team's Scrum board, using the settings in `config/sprints.xlsx`.
 - **Sprint Report:** a table of each team's recent closed sprints: committed, completed and spilled issues and story points, how many issues changed during the sprint, and the completion percentage. Export it to Excel.
 - **Velocity Chart:** a bar chart of one team's committed vs completed story points over its recent closed sprints, with the average velocity. Export it to Excel (with the chart) or save the chart as an image.
+- **Burndown Chart:** one sprint's remaining story points over time against a straight guideline, with a day-by-day table. Export it to Excel (with the chart) or save the chart as an image.
 
 ## Configuring fields
 
@@ -126,6 +127,24 @@ These are the same numbers as the Sprint Report's committed and completed story 
 **Export to Excel...** saves the table, the average and a bar chart that Excel draws from the table. **Save chart image...** saves the chart as a PNG to paste into a slide or an email.
 
 The notes under the Sprint Report about where the numbers come from apply here too.
+
+## Burndown Chart
+
+Choose **Reports > Burndown Chart...** after logging in. Pick a team (from `config/sprints.xlsx`); the **Sprint** list then fills with that team's board's active and closed sprints, newest first. Pick one and click **Run report**.
+
+- **Remaining** (red line): story points of the sprint's issues that aren't done yet. It steps down when an issue is done, and up when an issue is added, re-estimated upwards or reopened.
+- **Guideline** (dashed): a straight line from the story points at the start to zero at the sprint's planned end.
+- For a closed sprint the line stops when it was closed; for an active one it stops now.
+
+The table lists each day with the remaining story points at the end of the day, the guideline, the story points completed that day, and the scope change that day (added or removed issues and re-estimates; positive means more work).
+
+**Export to Excel...** saves the table with a line chart of remaining vs guideline. **Save chart image...** saves the chart as a PNG.
+
+Notes:
+
+- The numbers come from the same data as Jira's own Burndown Chart (`/rest/greenhopper/1.0/rapid/charts/scopechangeburndownchart`), which Atlassian doesn't document as a public API, like the Sprint Report's.
+- An issue counts as done when it reaches the board's last column, as in Jira's chart. "Story points" are the board's estimate field.
+- Days follow your computer's time zone.
 
 ## Running from source
 
