@@ -177,6 +177,8 @@ class FakeJira(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         if srv.retry_after is not None:
             self.send_header("Retry-After", srv.retry_after)
+        for k, v in srv.limit_headers.items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -354,6 +356,7 @@ def _serve(cloud):
     srv.rate_limit = 0  # answer this many requests with 429 first
     srv.retry_after = "0"  # Retry-After header for those, or None to send none
     srv.limited = []  # paths that got a 429
+    srv.limit_headers = {}  # extra headers on those, e.g. X-RateLimit-FillRate
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
