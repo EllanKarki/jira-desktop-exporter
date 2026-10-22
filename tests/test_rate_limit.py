@@ -22,10 +22,18 @@ def client(srv, deployment="datacenter"):
 
 @pytest.fixture
 def waits(monkeypatch):
-    """Record waits instead of sleeping."""
-    seen = []
-    monkeypatch.setattr(JiraClient, "_wait",
-                        lambda self, s, cancelled: seen.append(round(s, 1)) or True)
+    """Record waits instead of sleeping. waits.paced: waits spacing requests out."""
+    class Seen(list):
+        paced: list
+
+    seen = Seen()
+    seen.paced = []
+
+    def wait(self, s, cancelled, pacing=False):
+        (seen.paced if pacing else seen).append(round(s, 1))
+        return True
+
+    monkeypatch.setattr(JiraClient, "_wait", wait)
     return seen
 
 
@@ -64,15 +72,60 @@ def test_backoff_without_retry_after(jira_server, waits):
     assert waits == [2, 4]
 
 
-def test_gives_up_with_a_clear_message(jira_server, waits):
-    jira_server.rate_limit = 100
+def test_gives_up_after_five_minutes_with_details(jira_server, waits):
+    jira_server.rate_limit, jira_server.retry_after = 100, "20"
+    jira_server.limit_headers = {"X-RateLimit-Limit": "100", "X-RateLimit-Remaining": "0"}
     with pytest.raises(JiraError) as err:
         client(jira_server).fields()
     assert err.value.status == 429
     msg = str(err.value)
+    assert waits == [20] * 15  # 300 s in all
+    assert len(jira_server.limited) == 16
     assert "limiting how many requests" in msg and "Rate limit exceeded" in msg
-    assert len(waits) == JiraClient.RATE_LIMIT_RETRIES
-    assert len(jira_server.limited) == JiraClient.RATE_LIMIT_RETRIES + 1
+    assert "waited 300 s in total and tried 16 times" in msg
+    assert "Retry-After: 20" in msg and "X-RateLimit-Remaining: 0" in msg
+    assert "(Request: GET /rest/api/2/field)" in msg
+
+
+def test_short_retry_after_keeps_trying_but_not_forever(jira_server, waits):
+    jira_server.rate_limit, jira_server.retry_after = 1000, "0"
+    with pytest.raises(JiraError):
+        client(jira_server).myself()
+    assert len(jira_server.limited) == JiraClient.MAX_ATTEMPTS
+
+
+def test_blocked_account_fails_at_once(jira_server, waits):
+    jira_server.rate_limit = 100
+    jira_server.limit_headers = {"X-RateLimit-Limit": "0", "X-RateLimit-FillRate": "0"}
+    with pytest.raises(JiraError, match="allows no requests at all") as err:
+        client(jira_server).myself()
+    assert waits == [] and len(jira_server.limited) == 1
+    assert "Jira administration" in str(err.value)
+
+
+def test_waits_for_refill_and_paces_later_requests(jira_server, waits):
+    # Data Center style: 1 request back every 5 s; Retry-After says only 1 s.
+    jira_server.rate_limit, jira_server.retry_after = 1, "1"
+    jira_server.limit_headers = {"X-RateLimit-FillRate": "1",
+                                 "X-RateLimit-Interval-Seconds": "5"}
+    c = client(jira_server)
+    assert c.myself()
+    assert waits == [5]
+    c.fields()
+    c.fields()
+    # The clock doesn't move while waits are faked, so the slots pile up 5 s apart.
+    assert waits.paced == [0.0, 5.0, 10.0]
+
+
+def test_pacing_spaces_requests_in_real_time(jira_server, monkeypatch):
+    monkeypatch.setattr(JiraClient, "MIN_GAP_AFTER_LIMIT", 0.3)
+    jira_server.rate_limit, jira_server.retry_after = 1, "0"
+    c = client(jira_server)
+    c.myself()  # limited once, then served
+    start = time.monotonic()
+    for _ in range(3):
+        c.myself()
+    assert time.monotonic() - start >= 0.6
 
 
 def test_discover_fields_survives_rate_limit(jira_server, waits):
