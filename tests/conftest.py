@@ -164,9 +164,29 @@ class FakeJira(BaseHTTPRequestHandler):
             return base64.b64decode(h[6:]).decode() == "alice:secret"
         return False
 
+    def _rate_limited(self):
+        """Answer 429 while the server's rate_limit counter lasts (like Jira's limiter)."""
+        srv = self.server
+        with srv.lock:
+            if srv.rate_limit <= 0:
+                return False
+            srv.rate_limit -= 1
+            srv.limited.append(self.path)
+        data = json.dumps({"message": "Rate limit exceeded"}).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        if srv.retry_after is not None:
+            self.send_header("Retry-After", srv.retry_after)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
     def do_GET(self):
         if not self._authed():
             return self._send(401, {"errorMessages": ["nope"]})
+        if self._rate_limited():
+            return
         cloud = self.server.cloud
         if self.path == ("/rest/api/3/myself" if cloud else "/rest/api/2/myself"):
             if cloud:
@@ -262,6 +282,8 @@ class FakeJira(BaseHTTPRequestHandler):
         if not self._authed():
             return self._send(401, {})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self._rate_limited():
+            return
         if self.path == "/rest/agile/1.0/sprint":
             return self._create_sprint(body)
         if self.server.search_delay:
@@ -302,6 +324,10 @@ def _serve(cloud):
     srv.createmeta_status = None  # set to e.g. 404 to mimic Jira before 8.4
     srv.search_delay = 0  # seconds, to mimic a slow Jira
     srv.sprints = initial_sprints()
+    srv.lock = threading.Lock()
+    srv.rate_limit = 0  # answer this many requests with 429 first
+    srv.retry_after = "0"  # Retry-After header for those, or None to send none
+    srv.limited = []  # paths that got a 429
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

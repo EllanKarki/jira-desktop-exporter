@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Callable, Iterator
 from urllib.parse import quote, urlparse
 
@@ -18,6 +22,10 @@ class JiraError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status  # HTTP status, when Jira answered
+
+
+class Cancelled(JiraError):
+    """The caller cancelled while the client was waiting to retry."""
 
 
 def guess_deployment(url: str) -> str:
@@ -44,6 +52,11 @@ class Credentials:
 
 
 class JiraClient:
+    # When Jira says "too many requests" (429), wait as long as it asks (Retry-After),
+    # or back off 2, 4, 8... seconds, and try again up to this many times.
+    RATE_LIMIT_RETRIES = 6
+    MAX_WAIT = 60.0  # seconds, for any single wait
+
     def __init__(self, creds: Credentials, timeout: float = 30.0):
         self.base_url = creds.base_url.strip().rstrip("/")
         if not self.base_url.startswith(("http://", "https://")):
@@ -51,6 +64,7 @@ class JiraClient:
         self.timeout = timeout
         self.deployment = creds.deployment
         self.api = "/rest/api/3" if self.is_cloud else "/rest/api/2"
+        self._local = threading.local()  # per-thread wait notices
         self.session = requests.Session()
         self.session.verify = creds.verify_ssl
         self.session.headers.update({"Accept": "application/json"})
@@ -59,17 +73,31 @@ class JiraClient:
         else:
             self.session.auth = (creds.username, creds.secret)
 
-    def _request(self, method: str, path: str, **kwargs) -> dict | list:
+    def _request(self, method: str, path: str,
+                 cancelled: Callable[[], bool] | None = None, **kwargs) -> dict | list:
         url = f"{self.base_url}{path}"
-        try:
-            resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
-        except requests.exceptions.SSLError as exc:
+        for attempt in range(self.RATE_LIMIT_RETRIES + 1):
+            try:
+                resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            except requests.exceptions.SSLError as exc:
+                raise JiraError(
+                    "SSL certificate check failed. If your company uses an internal "
+                    "certificate, untick 'Verify SSL certificate' and try again."
+                ) from exc
+            except requests.exceptions.RequestException as exc:
+                raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
+            if resp.status_code != 429 or attempt == self.RATE_LIMIT_RETRIES:
+                break
+            if not self._wait(_retry_after(resp, attempt, self.MAX_WAIT), cancelled):
+                raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
+
+        if resp.status_code == 429:
+            detail = _error_text(resp)
             raise JiraError(
-                "SSL certificate check failed. If your company uses an internal "
-                "certificate, untick 'Verify SSL certificate' and try again."
-            ) from exc
-        except requests.exceptions.RequestException as exc:
-            raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
+                "Jira is limiting how many requests your account can make (429"
+                + (f": {detail}" if detail else "") + "). The app waited and retried "
+                f"{self.RATE_LIMIT_RETRIES} times. Wait a minute and try again; your Jira "
+                "admin can raise the limit for your account if this keeps happening.", 429)
 
         if resp.status_code in (401, 403):
             raise JiraError(self._auth_error(resp, method, path), resp.status_code)
@@ -83,6 +111,25 @@ class JiraClient:
                 "Jira returned a non-JSON response. Check the URL points to your Jira "
                 "base address (for example https://jira.company.com)."
             ) from exc
+
+    def notify_waits(self, callback: Callable[[float], None] | None):
+        """Call `callback(seconds)` whenever a request on the calling thread has to wait
+        for Jira's rate limit, e.g. to tell the user why nothing is happening."""
+        self._local.on_wait = callback
+
+    def _wait(self, seconds: float, cancelled: Callable[[], bool] | None) -> bool:
+        """Sleep in short steps so a cancel isn't held up. False if cancelled."""
+        notice = getattr(self._local, "on_wait", None)
+        if notice and seconds >= 1:
+            notice(seconds)
+        end = time.monotonic() + seconds
+        while True:
+            if cancelled and cancelled():
+                return False
+            left = end - time.monotonic()
+            if left <= 0:
+                return True
+            time.sleep(min(0.25, left))
 
     def _auth_error(self, resp: requests.Response, method: str, path: str) -> str:
         """Explain a 401/403, including Jira's own reason so the user can act on it."""
@@ -131,7 +178,11 @@ class JiraClient:
         while True:
             if cancelled and cancelled():
                 return out
-            data = self._request("GET", path, params={"startAt": start, "maxResults": 50})
+            try:
+                data = self._request("GET", path, params={"startAt": start, "maxResults": 50},
+                                     cancelled=cancelled)
+            except Cancelled:
+                return out
             items = next((data[k] for k in keys if isinstance(data.get(k), list)), [])
             out.extend(items)
             start += len(items)
@@ -249,7 +300,11 @@ class JiraClient:
             body = {"jql": jql, "maxResults": page_size, "fields": field_ids}
             if token:
                 body["nextPageToken"] = token
-            data = self._request("POST", f"{self.api}/search/jql", json=body)
+            try:
+                data = self._request("POST", f"{self.api}/search/jql", json=body,
+                                     cancelled=cancelled)
+            except Cancelled:
+                return
             issues = data.get("issues", [])
             yield from issues
             done += len(issues)
@@ -273,16 +328,20 @@ class JiraClient:
         while True:
             if cancelled and cancelled():
                 return
-            data = self._request(
-                "POST",
-                f"{self.api}/search",
-                json={
-                    "jql": jql,
-                    "startAt": start,
-                    "maxResults": page_size,
-                    "fields": field_ids,
-                },
-            )
+            try:
+                data = self._request(
+                    "POST",
+                    f"{self.api}/search",
+                    json={
+                        "jql": jql,
+                        "startAt": start,
+                        "maxResults": page_size,
+                        "fields": field_ids,
+                    },
+                    cancelled=cancelled,
+                )
+            except Cancelled:
+                return
             issues = data.get("issues", [])
             total = data.get("total", 0)
             yield from issues
@@ -291,6 +350,27 @@ class JiraClient:
                 progress(start, total)
             if not issues or start >= total:
                 return
+
+
+def _retry_after(resp: requests.Response, attempt: int, cap: float) -> float:
+    """Seconds to wait before retrying a 429: Jira's Retry-After (seconds or an HTTP
+    date) if it sent one, otherwise 2, 4, 8... seconds."""
+    value = (resp.headers.get("Retry-After") or "").strip()
+    wait = None
+    if value:
+        try:
+            wait = float(value)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                wait = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                wait = None
+    if wait is None:
+        wait = 2.0 ** (attempt + 1)
+    return max(0.0, min(wait, cap))
 
 
 def _error_text(resp: requests.Response) -> str:
