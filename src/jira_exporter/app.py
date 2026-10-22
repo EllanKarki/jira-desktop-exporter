@@ -36,6 +36,7 @@ from jira_exporter.config import (
     load_config,
     resolve_fields,
 )
+from jira_exporter.burndown_dialog import BurndownDialog
 from jira_exporter.exporter import write_xlsx
 from jira_exporter.fields_dialog import FieldsDialog
 from jira_exporter.report_dialog import SprintReportDialog
@@ -475,7 +476,7 @@ class StartPage(QWidget):
             self.hint.setText(f"{html.escape(description)}<br><br>"
                               "Choose <b>Extract &gt; JQL Extract</b> to export issues, or "
                               "<b>Configuration &gt; Discover fields</b> to pick the fields, or "
-                              "<b>Reports</b> for sprint results and velocity.")
+                              "<b>Reports</b> for sprint results, velocity and burndown.")
 
 
 class MainWindow(QMainWindow):
@@ -488,6 +489,7 @@ class MainWindow(QMainWindow):
         self.sprint_dialog: SprintDialog | None = None
         self.report_dialog: SprintReportDialog | None = None
         self.velocity_dialog: VelocityDialog | None = None
+        self.burndown_dialog: BurndownDialog | None = None
         self.stack = QStackedWidget()
         self.start = StartPage()
         self.login = LoginPage(settings)
@@ -540,6 +542,9 @@ class MainWindow(QMainWindow):
         self.velocity_action = QAction("&Velocity Chart...", self)
         self.velocity_action.triggered.connect(self._velocity_chart)
         reports.addAction(self.velocity_action)
+        self.burndown_action = QAction("&Burndown Chart...", self)
+        self.burndown_action.triggered.connect(self._burndown_chart)
+        reports.addAction(self.burndown_action)
 
         # Re-check what is allowed each time a menu opens (e.g. an export may be running).
         for menu in (jira, config, extract, actions, reports):
@@ -558,6 +563,7 @@ class MainWindow(QMainWindow):
         self.sprint_action.setEnabled(logged_in)
         self.sprint_report_action.setEnabled(logged_in)
         self.velocity_action.setEnabled(logged_in)
+        self.burndown_action.setEnabled(logged_in)
 
     def _show_login(self):
         if not self._logged_in():
@@ -615,6 +621,19 @@ class MainWindow(QMainWindow):
         self.velocity_dialog = dialog
         dialog.open()
 
+    def _burndown_chart(self):
+        if not self._logged_in():
+            return
+        if self.burndown_dialog is not None:
+            self.burndown_dialog.raise_()
+            self.burndown_dialog.activateWindow()
+            return
+        dialog = BurndownDialog(self.export.client, self.settings, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.destroyed.connect(lambda *_: setattr(self, "burndown_dialog", None))
+        self.burndown_dialog = dialog
+        dialog.open()
+
     def _on_login(self, client, user):
         self.export.set_session(client, user)
         name = user.get("displayName") or user.get("name", "")
@@ -626,7 +645,7 @@ class MainWindow(QMainWindow):
     def _on_logout(self):
         if self.sprint_dialog is not None:
             self.sprint_dialog.reject()  # it holds the old session
-        for dialog in (self.report_dialog, self.velocity_dialog):
+        for dialog in (self.report_dialog, self.velocity_dialog, self.burndown_dialog):
             if dialog is not None:
                 dialog.reject()
         self.export.client = None

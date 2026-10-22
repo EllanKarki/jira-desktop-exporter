@@ -175,6 +175,22 @@ class JiraClient:
                                 404) from exc
             raise
 
+    def scope_change_burndown(self, board_id: int, sprint_id: int) -> dict:
+        """The data behind Jira's own Burndown Chart: every change to the sprint's issues
+        (added or removed, re-estimated, done or reopened) with its time, and the sprint's
+        start, end and completion times. Same undocumented /rest/greenhopper/1.0 family
+        as sprint_report."""
+        try:
+            return self._request(
+                "GET", "/rest/greenhopper/1.0/rapid/charts/scopechangeburndownchart",
+                params={"rapidViewId": int(board_id), "sprintId": int(sprint_id)})
+        except JiraError as exc:
+            if exc.status == 404:
+                raise JiraError(f"Jira has no burndown data for sprint {sprint_id} on board "
+                                f"{board_id}, or this Jira doesn't offer burndown charts.",
+                                404) from exc
+            raise
+
     def create_sprint(self, name: str, board_id: int, start: str | None = None,
                       end: str | None = None, goal: str | None = None) -> dict:
         """Create a future sprint on a board. Dates are ISO 8601 strings with an offset."""
