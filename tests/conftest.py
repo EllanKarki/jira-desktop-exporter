@@ -217,6 +217,8 @@ class FakeJira(BaseHTTPRequestHandler):
                 if parts[1] in (PROJECT["key"], PROJECT["id"]):
                     return self._send(200, PROJECT)
                 return self._send(404, {"errorMessages": ["No project could be found"]})
+            if parts[:1] == ["issue"] and len(parts) == 2:
+                return self._issue(parts[1], parse_qs(url.query), cloud)
             if parts[:2] == ["issue", "createmeta"] and len(parts) in (4, 5):
                 return self._createmeta(parts, parse_qs(url.query), cloud)
         self._send(404, {"errorMessages": ["not found"]})
@@ -253,6 +255,30 @@ class FakeJira(BaseHTTPRequestHandler):
                   "self": "http://jira/rest/agile/1.0/sprint/x", "state": "future", **body}
         self.server.sprints.setdefault(board["id"], []).append(sprint)
         self._send(201, sprint)
+
+    def _issue(self, key, query, cloud):
+        """GET /issue/{key}: every field on the issue (empty ones as null), and with
+        expand=names,schema the field names and types."""
+        self.server.requests.append((self.path, None))
+        issue = next((i for i in ISSUES if i["key"] == key.upper()), None)
+        if issue is None:
+            return self._send(404, {"errorMessages": ["Issue does not exist or you do not "
+                                                      "have permission to see it."]})
+        fields = {f["id"]: None for f in FIELDS if f["id"] != "issuekey"}
+        fields.update(issue["fields"])
+        if cloud:
+            fields["description"] = ADF_DESC
+        fields["project"] = {"key": PROJECT["key"], "name": PROJECT["name"]}
+        fields["workratio"] = -1
+        body = {"key": issue["key"], "fields": fields}
+        expand = ",".join(query.get("expand", [])).split(",")
+        if "names" in expand:
+            body["names"] = {f["id"]: f["name"] for f in FIELDS if f["id"] in fields}
+            body["names"].update(project="Project", workratio="Work Ratio")
+        if "schema" in expand:
+            body["schema"] = {f["id"]: f["schema"] for f in FIELDS
+                              if f["id"] in fields and f["schema"]}
+        self._send(200, body)
 
     def _createmeta(self, parts, query, cloud):
         if parts[2] != PROJECT["key"] or parts[3] != "issuetypes":

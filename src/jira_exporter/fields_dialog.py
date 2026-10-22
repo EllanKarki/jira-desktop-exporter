@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -27,6 +28,7 @@ from jira_exporter.field_discovery import (
     DiscoveryResult,
     FieldUsage,
     discover_fields,
+    discover_from_issue,
     write_config,
     write_field_list_xlsx,
 )
@@ -52,9 +54,11 @@ class DiscoverWorker(QObject):
     finished = Signal(object)  # DiscoveryResult
     failed = Signal(str)
 
-    def __init__(self, client: JiraClient, project_key: str, sample_size: int):
+    def __init__(self, client: JiraClient, project_key: str, sample_size: int,
+                 one_issue: bool = False):
         super().__init__()
         self.client, self.project_key, self.sample_size = client, project_key, sample_size
+        self.one_issue = one_issue
         self._cancel = False
 
     def cancel(self):
@@ -65,9 +69,14 @@ class DiscoverWorker(QObject):
         self.client.notify_waits(lambda s: self.progress.emit(
             f"Jira asked the app to slow down; waiting {s:.0f} s before trying again..."))
         try:
-            result = discover_fields(self.client, self.project_key, self.sample_size,
-                                     progress=self.progress.emit,
-                                     cancelled=lambda: self._cancel)
+            if self.one_issue:
+                result = discover_from_issue(self.client, self.project_key,
+                                             progress=self.progress.emit,
+                                             cancelled=lambda: self._cancel)
+            else:
+                result = discover_fields(self.client, self.project_key, self.sample_size,
+                                         progress=self.progress.emit,
+                                         cancelled=lambda: self._cancel)
             self.finished.emit(result)
         except JiraError as exc:
             self.failed.emit(str(exc))
@@ -101,12 +110,23 @@ class FieldsDialog(QDialog):
         self.sample.setValue(int(settings.value("discover_sample", 200)))
         self.sample.setToolTip("How many of the most recently updated issues to check for "
                                "filled-in fields (0 = only read the create screens).")
+        self.mode = QComboBox()
+        self.mode.addItem("Full scan", False)
+        self.mode.addItem("One sample issue", True)
+        self.mode.setToolTip("Full scan: the project's create screens plus recent issues.\n"
+                             "One sample issue: read a single issue's fields (one or two "
+                             "requests), e.g. when Jira limits how many requests you can make.")
+        self.mode.setCurrentIndex(1 if settings.value("discover_one_issue", False,
+                                                      type=bool) else 0)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
         self.scan_btn = QPushButton("Scan")
         self.scan_btn.clicked.connect(self._scan)
+        self.sample_label = QLabel("Issues to check")
         top = QHBoxLayout()
         top.addWidget(QLabel("Project"))
         top.addWidget(self.project, 1)
-        top.addWidget(QLabel("Issues to check"))
+        top.addWidget(self.mode)
+        top.addWidget(self.sample_label)
         top.addWidget(self.sample)
         top.addWidget(self.scan_btn)
 
@@ -166,12 +186,23 @@ class FieldsDialog(QDialog):
         for b in self.findChildren(QPushButton):
             b.setAutoDefault(False)
             b.setDefault(False)
+        self._mode_changed()
 
     # ------------------------------------------------------------- scanning ---
 
     def _say(self, text: str, error: bool = False):
         self.status.setStyleSheet("color: #c0392b;" if error else "")
         self.status.setText(text)
+
+    def _one_issue(self) -> bool:
+        return bool(self.mode.currentData())
+
+    def _mode_changed(self, *_):
+        one = self._one_issue()
+        self.sample_label.setVisible(not one)
+        self.sample.setVisible(not one)
+        self.project.setPlaceholderText("Issue key (ABC-123), or a project key to use its "
+                                        "latest issue" if one else "Project key, e.g. ABC")
 
     def _set_result_buttons(self, on: bool):
         for b in (self.select_used_btn, self.tick_all_btn, self.clear_btn, self.save_btn,
@@ -181,16 +212,18 @@ class FieldsDialog(QDialog):
     def _scan(self):
         key = self.project.text().strip()
         if not key:
-            self._say("Enter a project key first.")
+            self._say("Enter an issue or project key first." if self._one_issue()
+                      else "Enter a project key first.")
             return
         if self._thread is not None:
             return
         self.settings.setValue("discover_project", key)
         self.settings.setValue("discover_sample", self.sample.value())
+        self.settings.setValue("discover_one_issue", self._one_issue())
         self.scan_btn.setEnabled(False)
         self._set_result_buttons(False)
         self._say(f"Scanning {key}...")
-        worker = DiscoverWorker(self.client, key, self.sample.value())
+        worker = DiscoverWorker(self.client, key, self.sample.value(), self._one_issue())
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -237,9 +270,16 @@ class FieldsDialog(QDialog):
         self.result = result
         used = sum(1 for f in result.fields if f.used_in and not f.is_key)
         on_screens = sum(1 for f in result.fields if f.issue_types)
-        msg = (f"{result.project_name} ({result.project_key}): {len(result.relevant)} fields in use. "
-               f"{used} have values in the {result.sampled} most recently updated issues, "
-               f"{on_screens} are on a create screen. Ticked: fields with values.")
+        if result.source_issue:
+            empty = sum(1 for f in result.fields if not f.used_in)
+            msg = (f"{result.project_name} ({result.project_key}): {used} fields have values "
+                   f"on {result.source_issue}, and {empty} more are empty on it (tick 'Show "
+                   "fields the project doesn't use' to list them). Ticked: fields with values.")
+        else:
+            msg = (f"{result.project_name} ({result.project_key}): {len(result.relevant)} "
+                   f"fields in use. {used} have values in the {result.sampled} most recently "
+                   f"updated issues, {on_screens} are on a create screen. Ticked: fields with "
+                   "values.")
         if result.warnings:
             msg += " Note: " + " ".join(result.warnings)
         self._say(msg)

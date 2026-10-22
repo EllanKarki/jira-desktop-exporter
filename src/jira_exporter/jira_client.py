@@ -161,6 +161,17 @@ class JiraClient:
         """Return all fields (system and custom) visible to the user."""
         return self._request("GET", f"{self.api}/field")
 
+    def issue(self, key: str, expand: str = "names,schema") -> dict:
+        """One issue with every field it has; `names` maps field ids to their names."""
+        try:
+            return self._request("GET", f"{self.api}/issue/{quote(key, safe='')}",
+                                 params={"expand": expand})
+        except JiraError as exc:
+            if exc.status == 404:
+                raise JiraError(f"Issue '{key}' was not found, or you don't have "
+                                "permission to see it.", 404) from exc
+            raise
+
     def project(self, key: str) -> dict:
         """Return a project by key or id; a clear error if it doesn't exist or isn't visible."""
         try:

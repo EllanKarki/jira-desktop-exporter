@@ -46,6 +46,8 @@ Instead of looking up field ids by hand, choose **Configuration > Discover field
 
 **Export field list to Excel...** saves the whole table (used and unused fields) as a reference.
 
+**One sample issue:** pick **One sample issue** next to the key box to read the fields from a single issue instead. Enter an issue key (`ABC-123`), or a project key to use its most recently updated issue. This takes one or two requests to Jira (`GET /issue/{key}?expand=names,schema`, plus a one-issue search when you give a project key), so it suits a Jira that limits how many requests you can make. Fields with a value on that issue are ticked; fields that are empty on it are listed under **Show fields the project doesn't use**. It only sees that one issue, so a field used on other issues or other issue types may be missing or shown as unused.
+
 Notes:
 
 - The scan only sees what your Jira account can see, like the rest of the app.
