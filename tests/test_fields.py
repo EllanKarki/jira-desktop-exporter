@@ -424,3 +424,59 @@ def test_tick_all_ticks_listed_rows(jira_server, tmp_path):
     dlg.tick_all_btn.click()
     assert len(dlg.selected_fields()) == len(dlg.result.fields)
     dlg.reject()
+
+
+# ------------------------------------------------------- one sample issue ---
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_discover_from_one_issue(jira_server, cloud_server, cloud):
+    from jira_exporter.field_discovery import discover_from_issue
+    srv = cloud_server if cloud else jira_server
+    result = discover_from_issue(client(srv, CLOUD if cloud else "datacenter"), "abc-3")
+    api = "/rest/api/3" if cloud else "/rest/api/2"
+    assert [p for p, _ in srv.requests] == [f"{api}/issue/ABC-3?expand=names%2Cschema"]
+    assert (result.project_key, result.project_name, result.source_issue, result.sampled) == \
+        ("ABC", "Alpha Beta", "ABC-3", 1)
+    by = _by_id(result)
+    assert by["issuekey"].used_in == 1 and result.fields[0].is_key
+    assert by["summary"].used_in == 1 and by["summary"].name == "Summary"
+    assert by["labels"].type == "array"
+    assert by["customfield_10002"].name == "Story Points"
+    # Empty on this issue: listed, but not used or ticked.
+    assert by["assignee"].used_in == 0  # ABC-3 has no assignee
+    assert by["customfield_10003"].used_in == 0 and not by["customfield_10003"].suggested
+    assert by["customfield_10003"].custom and by["customfield_10003"].name == "Severity"
+    assert by["workratio"].used_in == 0  # -1 = no estimate
+    assert "one issue, ABC-3" in result.warnings[0]
+
+
+def test_discover_from_project_uses_latest_issue(jira_server):
+    from jira_exporter.field_discovery import discover_from_issue
+    result = discover_from_issue(client(jira_server), "ABC")
+    assert result.source_issue == "ABC-1"
+    paths = [p for p, _ in jira_server.requests]
+    assert paths == ["/rest/api/2/search", "/rest/api/2/issue/ABC-1?expand=names%2Cschema"]
+    assert jira_server.requests[0][1]["maxResults"] == 1
+
+
+def test_discover_from_issue_errors(jira_server):
+    from jira_exporter.field_discovery import discover_from_issue
+    with pytest.raises(JiraError, match="Issue 'ABC-999' was not found"):
+        discover_from_issue(client(jira_server), "ABC-999")
+    with pytest.raises(JiraError, match="Project 'NOPE' was not found"):
+        discover_from_issue(client(jira_server), "NOPE")
+
+
+def test_dialog_one_issue_mode(jira_server, tmp_path):
+    qapp, dlg = _dialog(jira_server, tmp_path)
+    assert dlg.sample.isVisibleTo(dlg)
+    dlg.mode.setCurrentIndex(1)
+    assert not dlg.sample.isVisibleTo(dlg) and "Issue key" in dlg.project.placeholderText()
+    assert _scan(qapp, dlg, "ABC-3")
+    assert dlg.result.source_issue == "ABC-3"
+    assert "fields have values on ABC-3" in dlg.status.text()
+    assert len(jira_server.requests) == 1
+    ids = {f.id for f in dlg.selected_fields()}
+    assert {"issuekey", "summary", "status"} <= ids and "customfield_10003" not in ids
+    assert dlg.settings.value("discover_one_issue", type=bool) is True
+    dlg.reject()

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -52,6 +54,7 @@ class DiscoveryResult:
     fields: list[FieldUsage]
     sampled: int
     warnings: list[str] = field(default_factory=list)
+    source_issue: str = ""  # set when the fields were read from one issue
 
     @property
     def relevant(self) -> list[FieldUsage]:
@@ -79,6 +82,74 @@ def has_value(value) -> bool:
         return any(has_value(v) for k, v in value.items()
                    if k not in _META_KEYS and not isinstance(v, bool))
     return True
+
+
+ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+
+
+def _sorted(fields) -> list[FieldUsage]:
+    return sorted(fields, key=lambda f: (not f.is_key, -f.used_in, not f.issue_types,
+                                         f.name.lower()))
+
+
+def _counts(fid: str, value) -> bool:
+    if fid == "workratio" and isinstance(value, (int, float)) and value < 0:
+        return False  # -1 means "no estimate"
+    return has_value(value)
+
+
+def discover_from_issue(
+    client: JiraClient,
+    key: str,
+    progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> DiscoveryResult:
+    """Quick scan: read one issue's JSON (with field names) instead of the create screens
+    and a sample of issues. `key` is an issue key (ABC-123), or a project key to use its
+    most recently updated issue. Needs only one or two requests."""
+    say = progress or (lambda _msg: None)
+    stop = cancelled or (lambda: False)
+    key = key.strip()
+    if ISSUE_KEY.match(key):
+        issue_key = key.upper()
+    else:
+        project = client.project(key)
+        say(f"Finding the latest issue in {project.get('key', key)}...")
+        latest = list(itertools.islice(
+            client.search(jql_for_project(project.get("key", key)), ["summary"], page_size=1,
+                          cancelled=stop), 1))
+        if not latest:
+            if stop():
+                return DiscoveryResult(project.get("key", key), project.get("name", key), [], 0)
+            raise JiraError(f"Project {project.get('key', key)} has no issues you can see, "
+                            "so there is no sample issue to read.")
+        issue_key = latest[0]["key"]
+    if stop():
+        return DiscoveryResult(key, key, [], 0)
+    say(f"Reading {issue_key}...")
+    issue = client.issue(issue_key)
+    values = issue.get("fields") or {}
+    names = issue.get("names") or {}
+    schemas = issue.get("schema") or {}
+    project = values.get("project") or {}
+
+    fields: list[FieldUsage] = [FieldUsage("issuekey", "Key", used_in=1)]
+    for fid in dict.fromkeys([*names, *values]):  # names first, keeping Jira's order
+        if fid in KEY_FIELD_IDS:
+            continue
+        schema = schemas.get(fid) or {}
+        kind = schema.get("type", "")
+        if kind == "array" and schema.get("items"):
+            kind = f"array of {schema['items']}"
+        fields.append(FieldUsage(fid, names.get(fid, fid),
+                                 custom=fid.startswith("customfield_") or "custom" in schema,
+                                 type=kind, used_in=int(_counts(fid, values.get(fid)))))
+    warning = (f"Fields read from one issue, {issue_key}. A field that is empty on this "
+               "issue shows as unused even if other issues fill it in, and fields that "
+               "aren't on this issue type are not listed.")
+    return DiscoveryResult(project.get("key", issue_key.rsplit("-", 1)[0]),
+                           project.get("name", project.get("key", "")) or issue_key,
+                           _sorted(fields), 1, [warning], source_issue=issue_key)
 
 
 def jql_for_project(project_key: str) -> str:
@@ -147,9 +218,7 @@ def discover_fields(
                                    page_size=min(100, sample_size), cancelled=stop):
             sampled += 1
             for fid, value in (issue.get("fields") or {}).items():
-                if fid == "workratio" and isinstance(value, (int, float)) and value < 0:
-                    continue  # -1 means "no estimate"
-                if has_value(value):
+                if _counts(fid, value):
                     usage = by_id.setdefault(fid, FieldUsage(fid, fid))
                     usage.used_in += 1
             if sampled % 50 == 0:
@@ -163,9 +232,7 @@ def discover_fields(
         warnings.append("No issues were checked, so only create screen fields are listed. "
                         "Raise 'Issues to check' to see which fields are filled in.")
 
-    fields = sorted(by_id.values(),
-                    key=lambda f: (not f.is_key, -f.used_in, not f.issue_types, f.name.lower()))
-    return DiscoveryResult(project_key, project_name, fields, sampled, warnings)
+    return DiscoveryResult(project_key, project_name, _sorted(by_id.values()), sampled, warnings)
 
 
 def config_entries(selected: list[FieldUsage]) -> list[dict]:
