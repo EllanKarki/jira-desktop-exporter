@@ -24,6 +24,10 @@ class JiraError(Exception):
         self.status = status  # HTTP status, when Jira answered
 
 
+class JiraTimeout(JiraError):
+    """Jira didn't answer in time (it may still be working on the request)."""
+
+
 class Cancelled(JiraError):
     """The caller cancelled while the client was waiting to retry."""
 
@@ -60,12 +64,16 @@ class JiraClient:
     # After a 429, space later requests at least this far apart (or by the refill time
     # Jira's X-RateLimit headers give), so a scan doesn't empty the allowance again.
     MIN_GAP_AFTER_LIMIT = 1.0
+    # A request Jira takes too long to answer is retried after these waits (reads only);
+    # a search page that times out is retried with half as many issues, down to this.
+    TIMEOUT_RETRY_WAITS = (5.0, 15.0)
+    MIN_PAGE_SIZE = 10
 
-    def __init__(self, creds: Credentials, timeout: float = 30.0):
+    def __init__(self, creds: Credentials, timeout: float = 120.0):
         self.base_url = creds.base_url.strip().rstrip("/")
         if not self.base_url.startswith(("http://", "https://")):
             self.base_url = "https://" + self.base_url
-        self.timeout = timeout
+        self.timeout = timeout  # seconds to wait for an answer (connecting: at most 15)
         self.deployment = creds.deployment
         self.api = "/rest/api/3" if self.is_cloud else "/rest/api/2"
         self._local = threading.local()  # per-thread wait notices
@@ -81,14 +89,35 @@ class JiraClient:
             self.session.auth = (creds.username, creds.secret)
 
     def _request(self, method: str, path: str,
-                 cancelled: Callable[[], bool] | None = None, **kwargs) -> dict | list:
+                 cancelled: Callable[[], bool] | None = None,
+                 retry_timeouts: bool | None = None, **kwargs) -> dict | list:
+        """`retry_timeouts`: retry when Jira doesn't answer in time. Default: only for GET,
+        since a POST that timed out may still have been carried out."""
         url = f"{self.base_url}{path}"
-        waited, attempt = 0.0, 0
+        if retry_timeouts is None:
+            retry_timeouts = method == "GET"
+        waited, attempt, timeouts = 0.0, 0, 0
         while True:
             if not self._pace(cancelled):
                 raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
             try:
-                resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
+                resp = self.session.request(method, url, timeout=(min(15.0, self.timeout),
+                                                                  self.timeout), **kwargs)
+            except requests.exceptions.Timeout as exc:
+                if retry_timeouts and timeouts < len(self.TIMEOUT_RETRY_WAITS):
+                    pause = self.TIMEOUT_RETRY_WAITS[timeouts]
+                    timeouts += 1
+                    self._note(f"Jira didn't answer within {self.timeout:.0f} s; trying "
+                               f"again in {pause:.0f} s (attempt {timeouts + 1})...")
+                    if not self._wait(pause, cancelled, pacing=True):
+                        raise Cancelled("Cancelled while waiting to retry.") from exc
+                    continue
+                raise JiraTimeout(
+                    f"Jira at {self.base_url} didn't answer within {self.timeout:.0f} s"
+                    + (f" (tried {timeouts + 1} times)" if timeouts else "") + ". It may be "
+                    "busy; try again later, or ask for less at once (fewer fields, or a "
+                    "smaller max_results_per_page in fields.json).\n"
+                    f"(Request: {method} {path})") from exc
             except requests.exceptions.SSLError as exc:
                 raise JiraError(
                     "SSL certificate check failed. If your company uses an internal "
@@ -164,10 +193,27 @@ class JiraClient:
         lines.append(f"(Request: {method} {path})")
         return "\n".join(lines)
 
-    def notify_waits(self, callback: Callable[[float], None] | None):
+    def notify_waits(self, callback: Callable[[float], None] | None,
+                     notes: Callable[[str], None] | None = None):
         """Call `callback(seconds)` whenever a request on the calling thread has to wait
-        for Jira's rate limit, e.g. to tell the user why nothing is happening."""
+        for Jira's rate limit, and `notes(text)` for other slow-downs (timeouts, smaller
+        pages), e.g. to tell the user why nothing is happening."""
         self._local.on_wait = callback
+        self._local.on_note = notes
+
+    def _note(self, text: str):
+        notes = getattr(self._local, "on_note", None)
+        if notes:
+            notes(text)
+
+    def _shrink(self, page_size: int, exc: JiraTimeout) -> int:
+        """Half the page after a timed-out search page, or give up at MIN_PAGE_SIZE."""
+        if page_size <= self.MIN_PAGE_SIZE:
+            raise exc
+        smaller = max(self.MIN_PAGE_SIZE, page_size // 2)
+        self._note(f"Jira took too long to return {page_size} issues at once; asking for "
+                   f"{smaller} at a time instead...")
+        return smaller
 
     def _wait(self, seconds: float, cancelled: Callable[[], bool] | None,
               pacing: bool = False) -> bool:
@@ -366,10 +412,15 @@ class JiraClient:
             if token:
                 body["nextPageToken"] = token
             try:
+                # Searches only read, so a timeout at the smallest page can be retried.
                 data = self._request("POST", f"{self.api}/search/jql", json=body,
-                                     cancelled=cancelled)
+                                     cancelled=cancelled,
+                                     retry_timeouts=page_size <= self.MIN_PAGE_SIZE)
             except Cancelled:
                 return
+            except JiraTimeout as exc:
+                page_size = self._shrink(page_size, exc)
+                continue
             issues = data.get("issues", [])
             yield from issues
             done += len(issues)
@@ -404,9 +455,13 @@ class JiraClient:
                         "fields": field_ids,
                     },
                     cancelled=cancelled,
+                    retry_timeouts=page_size <= self.MIN_PAGE_SIZE,
                 )
             except Cancelled:
                 return
+            except JiraTimeout as exc:
+                page_size = self._shrink(page_size, exc)
+                continue
             issues = data.get("issues", [])
             total = data.get("total", 0)
             yield from issues

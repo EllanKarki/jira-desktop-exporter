@@ -189,6 +189,11 @@ class FakeJira(BaseHTTPRequestHandler):
             return self._send(401, {"errorMessages": ["nope"]})
         if self._rate_limited():
             return
+        if self.server.slow_gets > 0:  # answer the next N GETs too late
+            import time
+            self.server.slow_gets -= 1
+            time.sleep(self.server.slow_delay)
+            return
         cloud = self.server.cloud
         if self.path == ("/rest/api/3/myself" if cloud else "/rest/api/2/myself"):
             if cloud:
@@ -317,6 +322,12 @@ class FakeJira(BaseHTTPRequestHandler):
         if self.server.search_delay:
             import time
             time.sleep(self.server.search_delay)
+        srv = self.server
+        if srv.slow_above is not None and body.get("maxResults", 0) > srv.slow_above:
+            import time
+            srv.slow_pages.append(body.get("maxResults"))
+            time.sleep(srv.slow_delay)  # longer than the client's timeout
+            return
         if body["jql"] == "bad":
             return self._send(400, {"errorMessages": ["Error in the JQL Query"]})
         self.server.requests.append((self.path, body))
@@ -356,6 +367,10 @@ def _serve(cloud):
     srv.rate_limit = 0  # answer this many requests with 429 first
     srv.retry_after = "0"  # Retry-After header for those, or None to send none
     srv.limited = []  # paths that got a 429
+    srv.slow_above = None  # searches asking for more issues than this answer too late
+    srv.slow_gets = 0
+    srv.slow_delay = 1.0
+    srv.slow_pages = []  # page sizes that were answered too late
     srv.limit_headers = {}  # extra headers on those, e.g. X-RateLimit-FillRate
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
