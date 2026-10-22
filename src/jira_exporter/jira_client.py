@@ -53,9 +53,13 @@ class Credentials:
 
 class JiraClient:
     # When Jira says "too many requests" (429), wait as long as it asks (Retry-After),
-    # or back off 2, 4, 8... seconds, and try again up to this many times.
-    RATE_LIMIT_RETRIES = 6
+    # or back off 2, 4, 8... seconds, and keep trying until MAX_TOTAL_WAIT is used up.
     MAX_WAIT = 60.0  # seconds, for any single wait
+    MAX_TOTAL_WAIT = 300.0  # seconds, for one request
+    MAX_ATTEMPTS = 30  # in case Jira keeps asking for very short waits
+    # After a 429, space later requests at least this far apart (or by the refill time
+    # Jira's X-RateLimit headers give), so a scan doesn't empty the allowance again.
+    MIN_GAP_AFTER_LIMIT = 1.0
 
     def __init__(self, creds: Credentials, timeout: float = 30.0):
         self.base_url = creds.base_url.strip().rstrip("/")
@@ -65,6 +69,9 @@ class JiraClient:
         self.deployment = creds.deployment
         self.api = "/rest/api/3" if self.is_cloud else "/rest/api/2"
         self._local = threading.local()  # per-thread wait notices
+        self._pace_lock = threading.Lock()
+        self._gap = 0.0  # seconds between requests, once Jira has limited us
+        self._next_at = 0.0  # monotonic time the next request may go out
         self.session = requests.Session()
         self.session.verify = creds.verify_ssl
         self.session.headers.update({"Accept": "application/json"})
@@ -76,7 +83,10 @@ class JiraClient:
     def _request(self, method: str, path: str,
                  cancelled: Callable[[], bool] | None = None, **kwargs) -> dict | list:
         url = f"{self.base_url}{path}"
-        for attempt in range(self.RATE_LIMIT_RETRIES + 1):
+        waited, attempt = 0.0, 0
+        while True:
+            if not self._pace(cancelled):
+                raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
             try:
                 resp = self.session.request(method, url, timeout=self.timeout, **kwargs)
             except requests.exceptions.SSLError as exc:
@@ -86,18 +96,21 @@ class JiraClient:
                 ) from exc
             except requests.exceptions.RequestException as exc:
                 raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
-            if resp.status_code != 429 or attempt == self.RATE_LIMIT_RETRIES:
+            self._learn_pace(resp)
+            if resp.status_code != 429:
                 break
-            if not self._wait(_retry_after(resp, attempt, self.MAX_WAIT), cancelled):
+            wait = max(_retry_after(resp, attempt, self.MAX_WAIT), _refill_time(resp) or 0.0)
+            wait = min(wait, self.MAX_WAIT)
+            if _blocked(resp) or waited + wait > self.MAX_TOTAL_WAIT or \
+                    attempt + 1 >= self.MAX_ATTEMPTS:
+                break
+            if not self._wait(wait, cancelled):
                 raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
+            waited += wait
+            attempt += 1
 
         if resp.status_code == 429:
-            detail = _error_text(resp)
-            raise JiraError(
-                "Jira is limiting how many requests your account can make (429"
-                + (f": {detail}" if detail else "") + "). The app waited and retried "
-                f"{self.RATE_LIMIT_RETRIES} times. Wait a minute and try again; your Jira "
-                "admin can raise the limit for your account if this keeps happening.", 429)
+            raise JiraError(self._limit_error(resp, method, path, attempt, waited), 429)
 
         if resp.status_code in (401, 403):
             raise JiraError(self._auth_error(resp, method, path), resp.status_code)
@@ -112,15 +125,56 @@ class JiraClient:
                 "base address (for example https://jira.company.com)."
             ) from exc
 
+    def _pace(self, cancelled: Callable[[], bool] | None) -> bool:
+        """Once Jira has rate-limited this client, keep requests _gap seconds apart."""
+        with self._pace_lock:
+            if self._gap <= 0:
+                return True
+            now = time.monotonic()
+            start = max(now, self._next_at)
+            self._next_at = start + self._gap
+        return self._wait(start - now, cancelled, pacing=True)
+
+    def _learn_pace(self, resp: requests.Response):
+        refill = _refill_time(resp)
+        limited = resp.status_code == 429
+        remaining = _header_number(resp, "X-RateLimit-Remaining")
+        if limited or (remaining is not None and remaining < 2 and refill):
+            gap = min(max(refill or 0.0, self.MIN_GAP_AFTER_LIMIT), self.MAX_WAIT)
+            with self._pace_lock:
+                self._gap = max(self._gap, gap)
+
+    def _limit_error(self, resp, method, path, attempts, waited) -> str:
+        lines = ["Jira is limiting how many requests your account can make (429)."]
+        detail = _error_text(resp)
+        if detail:
+            lines.append(f"Jira says: {detail}")
+        if _blocked(resp):
+            lines.append("Jira's rate limit for your account allows no requests at all, so "
+                         "waiting won't help. Ask your Jira admin to check the rate limiting "
+                         "settings for your account in Jira administration.")
+        else:
+            lines.append(f"The app waited {waited:.0f} s in total and tried {attempts + 1} "
+                         "times. Wait a few minutes and try again; if it keeps happening, "
+                         "ask your Jira admin to raise the rate limit for your account.")
+        limit_headers = [f"{k}: {v}" for k, v in resp.headers.items()
+                         if k.lower() == "retry-after" or k.lower().startswith("x-ratelimit")]
+        if limit_headers:
+            lines.append("Limit details from Jira: " + "; ".join(limit_headers))
+        lines.append(f"(Request: {method} {path})")
+        return "\n".join(lines)
+
     def notify_waits(self, callback: Callable[[float], None] | None):
         """Call `callback(seconds)` whenever a request on the calling thread has to wait
         for Jira's rate limit, e.g. to tell the user why nothing is happening."""
         self._local.on_wait = callback
 
-    def _wait(self, seconds: float, cancelled: Callable[[], bool] | None) -> bool:
-        """Sleep in short steps so a cancel isn't held up. False if cancelled."""
+    def _wait(self, seconds: float, cancelled: Callable[[], bool] | None,
+              pacing: bool = False) -> bool:
+        """Sleep in short steps so a cancel isn't held up. False if cancelled.
+        Retry waits of 1 s or more are announced; pacing waits only when long."""
         notice = getattr(self._local, "on_wait", None)
-        if notice and seconds >= 1:
+        if notice and seconds >= (5 if pacing else 1):
             notice(seconds)
         end = time.monotonic() + seconds
         while True:
@@ -371,6 +425,29 @@ def _retry_after(resp: requests.Response, attempt: int, cap: float) -> float:
     if wait is None:
         wait = 2.0 ** (attempt + 1)
     return max(0.0, min(wait, cap))
+
+
+def _header_number(resp: requests.Response, name: str) -> float | None:
+    try:
+        return float(resp.headers.get(name, "").strip())
+    except ValueError:
+        return None
+
+
+def _refill_time(resp: requests.Response) -> float | None:
+    """Seconds for one request's worth of allowance to come back, from the X-RateLimit
+    headers Jira Data Center's rate limiting sends (FillRate requests per Interval)."""
+    rate = _header_number(resp, "X-RateLimit-FillRate")
+    interval = _header_number(resp, "X-RateLimit-Interval-Seconds")
+    if rate and rate > 0:
+        return (interval if interval and interval > 0 else 1.0) / rate
+    return None
+
+
+def _blocked(resp: requests.Response) -> bool:
+    """The headers say the account may make no requests at all, so retrying is pointless."""
+    return _header_number(resp, "X-RateLimit-Limit") == 0 or \
+        _header_number(resp, "X-RateLimit-FillRate") == 0
 
 
 def _error_text(resp: requests.Response) -> str:
