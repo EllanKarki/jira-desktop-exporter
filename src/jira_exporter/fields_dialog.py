@@ -62,6 +62,8 @@ class DiscoverWorker(QObject):
 
     @Slot()
     def run(self):
+        self.client.notify_waits(lambda s: self.progress.emit(
+            f"Jira asked the app to slow down; waiting {s:.0f} s before trying again..."))
         try:
             result = discover_fields(self.client, self.project_key, self.sample_size,
                                      progress=self.progress.emit,
