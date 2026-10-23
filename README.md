@@ -70,7 +70,7 @@ How adding works:
 - An issue whose key is already in the file has its row overwritten with the fresh values, so it never appears twice. New issues go at the bottom. This needs the issue key column in your fields config; without it the app warns that issues may be repeated.
 - The file is only saved once every issue has been fetched, so a failed or timed-out export leaves the file as it was. Cancel still saves what was fetched.
 - If the file doesn't exist yet, it is created as usual.
-- The app reads the whole file before adding to it. On a file of about 32,000 issues × 140 columns this took about a minute on a test machine and needs a couple of GB of memory, so keep very large files closed in Excel and expect a short wait.
+- The app reads the whole file before adding to it. On a file of about 32,000 issues × 140 columns adding 2,500 issues took about two minutes on a test machine and needs a couple of GB of memory, so keep very large files closed in Excel and expect a short wait.
 
 The choice is remembered for next time. JQL chooses which issues are exported; the columns still come from the fields config.
 
