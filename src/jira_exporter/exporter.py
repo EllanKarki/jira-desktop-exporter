@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,6 +12,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from jira_exporter.config import ResolvedField
+from jira_exporter.timing import EXCEL, FINISH, ROWS, SAVE, ExportTimer
 
 # Excel rejects cells longer than this.
 MAX_CELL_LEN = 32767
@@ -166,8 +168,13 @@ def issue_to_row(issue: dict, fields: list[ResolvedField]) -> list[Any]:
     return row
 
 
-def write_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict]) -> int:
-    """Write issues to `path`. Returns the number of issues written."""
+def write_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict],
+               timer: ExportTimer | None = None) -> int:
+    """Write issues to `path`. Returns the number of issues written.
+
+    With a `timer`, the time spent converting, adding, formatting and saving is
+    added to it, and formatting and saving are logged as steps."""
+    clock = time.perf_counter
     wb = Workbook()
     ws = wb.active
     ws.title = "Issues"
@@ -180,12 +187,18 @@ def write_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict]) 
     widths = [len(f.header) for f in fields]
     count = 0
     for issue in issues:
+        t0 = clock()
         row = issue_to_row(issue, fields)
+        t1 = clock()
         ws.append(row)
         count += 1
         for i, v in enumerate(row):
             widths[i] = max(widths[i], min(len(str(v)), 60))
+        if timer:
+            timer.add(ROWS, t1 - t0)
+            timer.add(EXCEL, clock() - t1)
 
+    t0 = clock()
     for i, f in enumerate(fields):
         col = get_column_letter(i + 1)
         ws.column_dimensions[col].width = widths[i] + 2
@@ -197,5 +210,12 @@ def write_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict]) 
                 cell.number_format = "yyyy-mm-dd"
     if count:
         ws.auto_filter.ref = ws.dimensions
-    wb.save(path)
+    if timer:
+        timer.add(FINISH, clock() - t0)
+        timer.step("Formatted the sheet (column widths, date formats, filter)")
+        with timer.timed(SAVE):
+            wb.save(path)
+        timer.step(f"Saved {path.name}")
+    else:
+        wb.save(path)
     return count
