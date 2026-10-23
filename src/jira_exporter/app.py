@@ -38,6 +38,7 @@ from jira_exporter.config import (
 )
 from jira_exporter.burndown_dialog import BurndownDialog
 from jira_exporter.exporter import write_xlsx
+from jira_exporter.timing import ExportTimer
 from jira_exporter.fields_dialog import FieldsDialog
 from jira_exporter.report_dialog import SprintReportDialog
 from jira_exporter.sprint_dialog import SprintDialog
@@ -96,37 +97,77 @@ class ExportWorker(QObject):
             self.stopped_early = True
         return self._cancel
 
+    def _say(self, text: str):
+        """Log a line on screen and keep it for the timing log file."""
+        self._lines.append(f"{datetime.now():%H:%M:%S}  {text}")
+        self.log.emit(text)
+
+    def _page_done(self, done: int, total: int):
+        self.timer.page(done - self._done, done, total)
+        self._done = done
+        self.progress.emit(done, total)
+
     @Slot()
     def run(self):
-        self.client.notify_waits(lambda s: self.log.emit(
+        self._lines, self._done = [], 0
+        self.timer = ExportTimer(self._say)
+        self.client.track_time(self.timer)
+        self.client.notify_waits(lambda s: self._say(
             f"Jira asked the app to slow down; waiting {s:.0f} s before trying again..."),
-            self.log.emit)
+            self._say)
+        error = None
         try:
-            self.log.emit("Reading field list from Jira...")
-            fields, problems = resolve_fields(self.config.fields, self.client.fields())
+            self._say("Reading field list from Jira...")
+            jira_fields = self.client.fields()
+            self.timer.step(f"Read the field list from Jira ({len(jira_fields)} fields)")
+            fields, problems = resolve_fields(self.config.fields, jira_fields)
             for p in problems:
-                self.log.emit(f"Warning: {p}")
+                self._say(f"Warning: {p}")
             if not fields:
-                self.failed.emit("None of the configured fields were found in Jira.")
-                return
-            self.log.emit(f"Exporting {len(fields)} columns: "
-                          + ", ".join(f.header for f in fields))
+                raise ConfigError("None of the configured fields were found in Jira.")
+            self._say(f"Exporting {len(fields)} columns: "
+                      + ", ".join(f.header for f in fields))
+            self.timer.step("Matched the configured fields")
             ids = [f.id for f in fields if f.id != "key"] or ["summary"]
             issues = self.client.search(
                 self.jql, ids, self.config.page_size,
-                progress=lambda done, total: self.progress.emit(done, total),
+                progress=self._page_done,
                 cancelled=self._should_stop,
             )
-            count = write_xlsx(self.out_path, fields, issues)
+            count = write_xlsx(self.out_path, fields, issues, self.timer)
             if self.stopped_early:
-                self.log.emit("Export cancelled; the file holds the issues fetched so far.")
-            self.finished.emit(count, str(self.out_path))
+                self._say("Export cancelled; the file holds the issues fetched so far.")
         except (JiraError, ConfigError) as exc:
-            self.failed.emit(str(exc))
+            error = str(exc)
         except PermissionError:
-            self.failed.emit(f"Cannot write {self.out_path}. Is it open in Excel?")
+            error = f"Cannot write {self.out_path}. Is it open in Excel?"
         except Exception as exc:
-            self.failed.emit(f"Unexpected error: {exc}")
+            error = f"Unexpected error: {exc}"
+        finally:
+            self.client.track_time(None)
+            if error:  # shown on screen by the page; kept here for the file
+                self._lines.append(f"{datetime.now():%H:%M:%S}  Error: {error}")
+            self.timer.summary()
+            self._write_timing_log()
+        if error:
+            self.failed.emit(error)
+        else:
+            self.finished.emit(count, str(self.out_path))
+
+    def _write_timing_log(self):
+        """Save the log next to the .xlsx, to share when an export is slow."""
+        path = self.out_path.with_name(self.out_path.stem + "-timing.log")
+        head = [f"Jira export timing log, {datetime.now():%Y-%m-%d %H:%M}",
+                f"Jira: {self.client.base_url} ({self.client.deployment})",
+                f"JQL: {self.jql}",
+                f"Columns: {len(self.config.fields)} configured; page size "
+                f"{self.config.page_size}", ""]
+        try:
+            path.write_text("\n".join(head + self._lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            self.log.emit(f"Could not save the timing log to {path}: {exc}")
+        else:
+            self.log.emit(f"Timing log saved to {path}")
 
 
 def _start(worker: QObject, owner: QObject) -> QThread:

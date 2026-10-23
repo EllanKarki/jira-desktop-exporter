@@ -179,6 +179,16 @@ QT_QPA_PLATFORM=offscreen pytest -q
 
 The tests run against a local fake Jira server, including a headless run of the real window: log in, export 250 issues across 3 pages, and check the Excel file. They also scan a project with **Discover fields**, save a `fields.json` from it and export with that file.
 
+## Export timing
+
+Every export logs how long each step took, to show where a slow export spends its time. Lines starting with `[time]` show:
+
+- **Each page:** how many issues, how much data Jira sent, and the time spent waiting for Jira to answer, reading its JSON, turning the issues into rows and adding them to the sheet (plus any pause for the rate limit or a retry), with the running total.
+- **One-off steps:** reading the field list, matching the configured fields, the Cloud issue count, formatting the sheet and saving the file.
+- **A summary at the end:** the total time per category with its share of the whole, the average and slowest page, and how many timeouts, smaller pages and rate-limit waits there were.
+
+The same log, with a time on each line and a header naming the Jira, JQL and page size, is saved next to the Excel file as `<name>-timing.log` (for example `jira_export-timing.log`), even when the export fails. Share that file when an export is slow.
+
 ## Notes and limits
 
 - **Data Center** uses REST API v2: `/rest/api/2/myself`, `/field`, `/search` (pages with `startAt`). **Discover fields** also uses `/project/{key}` and `/issue/createmeta/{key}/issuetypes[/{id}]`.

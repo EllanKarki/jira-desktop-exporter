@@ -12,6 +12,8 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from jira_exporter import timing
+
 DATA_CENTER = "datacenter"
 CLOUD = "cloud"
 
@@ -100,10 +102,15 @@ class JiraClient:
         while True:
             if not self._pace(cancelled):
                 raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
+            timer = getattr(self._local, "timer", None)
+            sent = time.perf_counter()
             try:
                 resp = self.session.request(method, url, timeout=(min(15.0, self.timeout),
                                                                   self.timeout), **kwargs)
             except requests.exceptions.Timeout as exc:
+                if timer:
+                    timer.add(timing.JIRA, time.perf_counter() - sent)
+                    timer.timeouts += 1
                 if retry_timeouts and timeouts < len(self.TIMEOUT_RETRY_WAITS):
                     pause = self.TIMEOUT_RETRY_WAITS[timeouts]
                     timeouts += 1
@@ -125,6 +132,9 @@ class JiraClient:
                 ) from exc
             except requests.exceptions.RequestException as exc:
                 raise JiraError(f"Could not reach Jira at {self.base_url}: {exc}") from exc
+            if timer:
+                timer.add(timing.JIRA, time.perf_counter() - sent)
+                timer.add_bytes(len(resp.content))
             self._learn_pace(resp)
             if resp.status_code != 429:
                 break
@@ -133,6 +143,8 @@ class JiraClient:
             if _blocked(resp) or waited + wait > self.MAX_TOTAL_WAIT or \
                     attempt + 1 >= self.MAX_ATTEMPTS:
                 break
+            if timer:
+                timer.limit_waits += 1
             if not self._wait(wait, cancelled):
                 raise Cancelled("Cancelled while waiting for Jira's rate limit.", 429)
             waited += wait
@@ -147,6 +159,9 @@ class JiraClient:
             raise JiraError(f"Jira returned {resp.status_code}: {_error_text(resp)}",
                             resp.status_code)
         try:
+            if timer:
+                with timer.timed(timing.JSON):
+                    return resp.json()
             return resp.json()
         except ValueError as exc:
             raise JiraError(
@@ -201,6 +216,10 @@ class JiraClient:
         self._local.on_wait = callback
         self._local.on_note = notes
 
+    def track_time(self, timer: timing.ExportTimer | None):
+        """Add the time requests on the calling thread take (and pause) to `timer`."""
+        self._local.timer = timer
+
     def _note(self, text: str):
         notes = getattr(self._local, "on_note", None)
         if notes:
@@ -211,6 +230,9 @@ class JiraClient:
         if page_size <= self.MIN_PAGE_SIZE:
             raise exc
         smaller = max(self.MIN_PAGE_SIZE, page_size // 2)
+        timer = getattr(self._local, "timer", None)
+        if timer:
+            timer.shrinks += 1
         self._note(f"Jira took too long to return {page_size} issues at once; asking for "
                    f"{smaller} at a time instead...")
         return smaller
@@ -222,6 +244,14 @@ class JiraClient:
         notice = getattr(self._local, "on_wait", None)
         if notice and seconds >= (5 if pacing else 1):
             notice(seconds)
+        timer = getattr(self._local, "timer", None)
+        if timer:
+            with timer.timed(timing.WAITS):
+                return self._sleep(seconds, cancelled)
+        return self._sleep(seconds, cancelled)
+
+    @staticmethod
+    def _sleep(seconds: float, cancelled: Callable[[], bool] | None) -> bool:
         end = time.monotonic() + seconds
         while True:
             if cancelled and cancelled():
@@ -404,6 +434,9 @@ class JiraClient:
                                       json={"jql": jql}).get("count", 0))
         except JiraError:
             total = 0
+        timer = getattr(self._local, "timer", None)
+        if timer:
+            timer.step("Counted matching issues (Cloud approximate count)")
         done, token = 0, None
         while True:
             if cancelled and cancelled():
