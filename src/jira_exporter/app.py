@@ -99,7 +99,8 @@ class ExportWorker(QObject):
     @Slot()
     def run(self):
         self.client.notify_waits(lambda s: self.log.emit(
-            f"Jira asked the app to slow down; waiting {s:.0f} s before trying again..."))
+            f"Jira asked the app to slow down; waiting {s:.0f} s before trying again..."),
+            self.log.emit)
         try:
             self.log.emit("Reading field list from Jira...")
             fields, problems = resolve_fields(self.config.fields, self.client.fields())
