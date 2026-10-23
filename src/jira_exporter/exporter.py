@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -167,35 +168,101 @@ def issue_to_row(issue: dict, fields: list[ResolvedField]) -> list[Any]:
 
 
 def write_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict]) -> int:
-    """Write issues to `path`. Returns the number of issues written."""
+    """Write issues to `path`, replacing any file there. Returns the number written."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Issues"
     ws.append([f.header for f in fields])
-    for cell in ws[1]:
+    count = 0
+    for issue in issues:
+        ws.append(issue_to_row(issue, fields))
+        count += 1
+    _finish_sheet(ws, [f.header for f in fields], {f.header: f.schema_type for f in fields})
+    wb.save(path)
+    return count
+
+
+@dataclass
+class AppendResult:
+    added: int = 0
+    updated: int = 0
+    warning: str = ""
+
+    @property
+    def count(self) -> int:
+        return self.added + self.updated
+
+
+def append_xlsx(path: Path, fields: list[ResolvedField], issues: Iterable[dict]) -> AppendResult:
+    """Add issues to the existing file at `path` (or create it).
+
+    Columns are matched by header. An issue whose key is already in the file has its
+    row overwritten instead of being added twice; new columns go on the right.
+    The file is only saved at the end, so a failed fetch leaves it untouched.
+    """
+    if not path.exists():
+        return AppendResult(added=write_xlsx(path, fields, issues))
+    wb = load_workbook(path)
+    ws = wb["Issues"] if "Issues" in wb.sheetnames else wb.active
+    headers = [c.value for c in ws[1]] if ws.max_row >= 1 else []
+    while headers and headers[-1] in (None, ""):
+        headers.pop()
+    for f in fields:
+        if f.header not in headers:
+            headers.append(f.header)
+            ws.cell(row=1, column=len(headers), value=f.header)
+    col = {h: i + 1 for i, h in enumerate(headers)}
+
+    key_field = next((f for f in fields if f.id == "key"), None)
+    result = AppendResult()
+    rows: dict[str, int] = {}
+    if key_field is None:
+        result.warning = ("The fields config has no issue key column, so issues already "
+                          "in the file may now appear twice.")
+    else:
+        kc = col[key_field.header]
+        for r in range(2, ws.max_row + 1):
+            v = ws.cell(row=r, column=kc).value
+            if v not in (None, ""):
+                rows.setdefault(str(v), r)
+
+    next_row = ws.max_row + 1
+    for issue in issues:
+        values = issue_to_row(issue, fields)
+        key = issue.get("key", "")
+        r = rows.get(key) if key_field is not None else None
+        if r is None:
+            r, next_row = next_row, next_row + 1
+            if key_field is not None and key:
+                rows[key] = r
+            result.added += 1
+        else:
+            result.updated += 1
+        for f, v in zip(fields, values):
+            ws.cell(row=r, column=col[f.header], value=v)
+
+    _finish_sheet(ws, headers, {f.header: f.schema_type for f in fields})
+    wb.save(path)
+    return result
+
+
+def _finish_sheet(ws, headers: list, types: dict) -> None:
+    """Header style, frozen header row, column widths, date formats and the filter."""
+    for cell in ws[1][: len(headers)]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="1F4E78")
     ws.freeze_panes = "A2"
-
-    widths = [len(f.header) for f in fields]
-    count = 0
-    for issue in issues:
-        row = issue_to_row(issue, fields)
-        ws.append(row)
-        count += 1
+    widths = [len(str(h)) for h in headers]
+    for row in ws.iter_rows(min_row=2, max_col=len(headers), values_only=True):
         for i, v in enumerate(row):
-            widths[i] = max(widths[i], min(len(str(v)), 60))
-
-    for i, f in enumerate(fields):
+            if v is not None:
+                widths[i] = max(widths[i], min(len(str(v)), 60))
+    for i, h in enumerate(headers):
         col = get_column_letter(i + 1)
         ws.column_dimensions[col].width = widths[i] + 2
-        if f.schema_type == "datetime":
-            for cell in ws[col][1:]:
-                cell.number_format = "yyyy-mm-dd hh:mm"
-        elif f.schema_type == "date":
-            for cell in ws[col][1:]:
-                cell.number_format = "yyyy-mm-dd"
-    if count:
-        ws.auto_filter.ref = ws.dimensions
-    wb.save(path)
-    return count
+        fmt = {"datetime": "yyyy-mm-dd hh:mm", "date": "yyyy-mm-dd"}.get(types.get(h))
+        if fmt:
+            for (cell,) in ws.iter_rows(min_row=2, min_col=i + 1, max_col=i + 1):
+                cell.number_format = fmt
+    if ws.max_row > 1:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{ws.max_row}"

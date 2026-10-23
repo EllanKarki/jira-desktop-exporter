@@ -37,7 +37,7 @@ from jira_exporter.config import (
     resolve_fields,
 )
 from jira_exporter.burndown_dialog import BurndownDialog
-from jira_exporter.exporter import write_xlsx
+from jira_exporter.exporter import append_xlsx, write_xlsx
 from jira_exporter.fields_dialog import FieldsDialog
 from jira_exporter.report_dialog import SprintReportDialog
 from jira_exporter.sprint_dialog import SprintDialog
@@ -80,9 +80,11 @@ class ExportWorker(QObject):
     finished = Signal(int, str)  # count, path
     failed = Signal(str)
 
-    def __init__(self, client: JiraClient, config: ExportConfig, jql: str, out_path: Path):
+    def __init__(self, client: JiraClient, config: ExportConfig, jql: str, out_path: Path,
+                 append: bool = False):
         super().__init__()
         self.client, self.config, self.jql, self.out_path = client, config, jql, out_path
+        self.append = append
         self._cancel = False
         self.stopped_early = False
 
@@ -117,7 +119,19 @@ class ExportWorker(QObject):
                 progress=lambda done, total: self.progress.emit(done, total),
                 cancelled=self._should_stop,
             )
-            count = write_xlsx(self.out_path, fields, issues)
+            if self.append:
+                existed = self.out_path.exists()
+                if existed:
+                    self.log.emit(f"Reading {self.out_path.name} to add to it...")
+                result = append_xlsx(self.out_path, fields, issues)
+                if result.warning:
+                    self.log.emit(f"Warning: {result.warning}")
+                if existed:
+                    self.log.emit(f"Added {result.added} new issues and updated "
+                                  f"{result.updated} already in the file.")
+                count = result.count
+            else:
+                count = write_xlsx(self.out_path, fields, issues)
             if self.stopped_early:
                 self.log.emit("Export cancelled; the file holds the issues fetched so far.")
             self.finished.emit(count, str(self.out_path))
@@ -294,6 +308,11 @@ class ExportPage(QWidget):
 
         self.jql = QPlainTextEdit(settings.value("jql", "project = ABC ORDER BY created DESC"))
         self.jql.setFixedHeight(70)
+        self.write_mode = QComboBox()
+        self.write_mode.addItem("Replace the file with this export", "replace")
+        self.write_mode.addItem("Add to the file (issues already there are updated)", "append")
+        self.write_mode.setCurrentIndex(
+            max(0, self.write_mode.findData(settings.value("write_mode", "replace"))))
 
         self.config_path = QLineEdit(settings.value("config_path", str(default_config_path())))
         browse_cfg = QPushButton("Browse...")
@@ -313,6 +332,7 @@ class ExportPage(QWidget):
 
         form = QFormLayout()
         form.addRow("JQL query", self.jql)
+        form.addRow("Existing file", self.write_mode)
         form.addRow("Fields config", cfg_row)
         form.addRow("Save to", out_row)
 
@@ -398,13 +418,15 @@ class ExportPage(QWidget):
         self.settings.setValue("jql", jql)
         self.settings.setValue("config_path", self.config_path.text())
         self.settings.setValue("out_dir", str(out.parent))
+        append = self.write_mode.currentData() == "append"
+        self.settings.setValue("write_mode", self.write_mode.currentData())
 
         self.log.clear()
         self.progress.setRange(0, 0)  # busy until the first page reports a total
         self.progress_label.setText("Starting export...")
         self.export_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self._worker = ExportWorker(self.client, config, jql, out)
+        self._worker = ExportWorker(self.client, config, jql, out, append=append)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self.log.appendPlainText)
         self._worker.finished.connect(self._on_finished)

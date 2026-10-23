@@ -9,6 +9,7 @@ A desktop app (Windows and macOS) for Jira users with normal Jira access, on **J
   - **Cloud:** email and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens). Cloud doesn't accept account passwords for API access.
   - The type is picked automatically when the URL ends in `.atlassian.net`, and you can change it for Cloud sites on a custom domain.
 - **Excel export:** enter any JQL query and the app fetches every matching issue page by page, writing them to `.xlsx` with a styled header, filters and real date cells.
+- **Replace or add to the file:** under the JQL box, **Existing file** chooses whether an export replaces the Excel file or adds to it. See [Adding to an existing export](#adding-to-an-existing-export).
 - **Configurable fields:** `config/fields.json` sets which fields are exported and in what order.
 - **Menus:** **Jira** (Login, Logout, Exit), **Configuration** (Discover fields), **Extract** (JQL Extract), **Jira Actions** (Create Sprint) and **Reports** (Sprint Report, Velocity Chart, Burndown Chart). The app opens on a start screen. The login form appears only when you choose **Jira > Login**, and the export form only when you choose **Extract > JQL Extract**; after logging in or out you're back on the start screen. Items that need a Jira connection are greyed out until you log in, and Logout is greyed out while an export runs.
 - **Discover fields:** pick a project and the app lists the fields it uses, so you can tick the ones you want and save them as a `fields.json`.
@@ -55,6 +56,23 @@ Notes:
 - A field that is filled in only on older issues won't show as used unless you raise **Issues to check**.
 
 The app looks for `config/fields.json` next to the app first. You can also pick any config file with **Browse...** on the export screen.
+
+## Adding to an existing export
+
+Large exports put a lot of load on Jira. To export a big set in parts, or to refresh only what changed, choose **Existing file > Add to the file** and narrow the JQL. For example:
+
+- `project = ABC AND created >= 2025-01-01`, then `project = ABC AND created < 2025-01-01` into the same file;
+- `project = ABC AND updated >= -7d` to bring last week's changes into an earlier full export.
+
+How adding works:
+
+- Columns are matched by their header text. A column in the file that the current fields config doesn't export is left as it is; a new column is added on the right.
+- An issue whose key is already in the file has its row overwritten with the fresh values, so it never appears twice. New issues go at the bottom. This needs the issue key column in your fields config; without it the app warns that issues may be repeated.
+- The file is only saved once every issue has been fetched, so a failed or timed-out export leaves the file as it was. Cancel still saves what was fetched.
+- If the file doesn't exist yet, it is created as usual.
+- The app reads the whole file before adding to it. On a file of about 32,000 issues × 140 columns this took about a minute on a test machine and needs a couple of GB of memory, so keep very large files closed in Excel and expect a short wait.
+
+The choice is remembered for next time. JQL chooses which issues are exported; the columns still come from the fields config.
 
 ## Creating sprints
 
